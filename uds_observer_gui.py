@@ -38,6 +38,7 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QScrollArea,
         QSplitter,
         QTabWidget,
         QTextEdit,
@@ -71,11 +72,15 @@ QWidget {
     font-family: Consolas, "JetBrains Mono", monospace;
     font-size: 12px;
 }
+QScrollArea {
+    border: none;
+    background: #12161c;
+}
 QGroupBox {
     border: 1px solid #2a3340;
     border-radius: 6px;
     margin-top: 8px;
-    padding: 8px;
+    padding: 7px;
     background: #171c24;
 }
 QGroupBox::title {
@@ -206,7 +211,13 @@ class UdsObserverGui(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1360, 840)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self.setMinimumSize(980, 640)
+        self.resize_to_screen()
         self.config_files: List[Path] = [p for p in DEFAULT_CONFIG_FILES if p.exists()]
         self.config: Dict[str, Any] = {}
         self.all_cases: List[Dict[str, Any]] = []
@@ -216,19 +227,38 @@ class UdsObserverGui(QMainWindow):
         self._build_ui()
         self.reload_config_and_cases()
 
+    def resize_to_screen(self) -> None:
+        screen = QApplication.primaryScreen()
+        if not screen:
+            self.resize(1280, 760)
+            return
+        available = screen.availableGeometry()
+        width = min(1360, max(980, int(available.width() * 0.92)))
+        height = min(820, max(640, int(available.height() * 0.88)))
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        frame.moveCenter(available.center())
+        self.move(frame.topLeft())
+
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
         main = QVBoxLayout(root)
+        main.setContentsMargins(10, 8, 10, 10)
+        main.setSpacing(8)
 
         header = QHBoxLayout()
         title = QLabel("UDS Observer Toolkit")
-        title.setFont(QFont("Consolas", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
         subtitle = QLabel("official UDS testcase workflow / evidence-focused runner")
         subtitle.setStyleSheet("color:#8b96a8")
+        subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         header.addWidget(title)
         header.addWidget(subtitle)
         header.addStretch(1)
+        self.fullscreen_btn = QPushButton("Full screen")
+        self.fullscreen_btn.setToolTip("Toggle full screen (F11). Press Esc to leave full screen.")
+        header.addWidget(self.fullscreen_btn)
         main.addLayout(header)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -236,11 +266,29 @@ class UdsObserverGui(QMainWindow):
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        left.setMinimumWidth(360)
+        left.setMaximumWidth(560)
         splitter.addWidget(left)
+
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        left_layout.addWidget(left_scroll, 1)
+
+        left_body = QWidget()
+        left_body_layout = QVBoxLayout(left_body)
+        left_body_layout.setContentsMargins(0, 0, 6, 0)
+        left_body_layout.setSpacing(8)
+        left_scroll.setWidget(left_body)
 
         cfg_group = QGroupBox("Config files")
         cfg_layout = QVBoxLayout(cfg_group)
         self.config_list = QListWidget()
+        self.config_list.setMinimumHeight(64)
+        self.config_list.setMaximumHeight(112)
         cfg_layout.addWidget(self.config_list)
         cfg_btns = QHBoxLayout()
         self.add_cfg_btn = QPushButton("Add YAML")
@@ -250,7 +298,7 @@ class UdsObserverGui(QMainWindow):
         cfg_btns.addWidget(self.remove_cfg_btn)
         cfg_btns.addWidget(self.reload_btn)
         cfg_layout.addLayout(cfg_btns)
-        left_layout.addWidget(cfg_group, 2)
+        left_body_layout.addWidget(cfg_group)
 
         target_group = QGroupBox("Connection / target override")
         target_layout = QVBoxLayout(target_group)
@@ -274,7 +322,7 @@ class UdsObserverGui(QMainWindow):
             row.addWidget(widget, 1)
             target_layout.addLayout(row)
         target_layout.addWidget(self.extended_check)
-        left_layout.addWidget(target_group, 2)
+        left_body_layout.addWidget(target_group)
 
         options_group = QGroupBox("Run options")
         options_layout = QVBoxLayout(options_group)
@@ -286,7 +334,7 @@ class UdsObserverGui(QMainWindow):
         self.verbose_check = QCheckBox("Verbose RX/debug")
         for cb in (self.dry_run_check, self.authorized_check, self.show_process_check, self.show_can_check, self.verbose_check):
             options_layout.addWidget(cb)
-        left_layout.addWidget(options_group, 1)
+        left_body_layout.addWidget(options_group)
 
         selector_group = QGroupBox("Testcase selector")
         selector_layout = QVBoxLayout(selector_group)
@@ -303,9 +351,10 @@ class UdsObserverGui(QMainWindow):
         selector_layout.addWidget(self.testcase_combo)
         self.detail_view = QTextEdit()
         self.detail_view.setReadOnly(True)
-        self.detail_view.setMinimumHeight(190)
+        self.detail_view.setMinimumHeight(140)
         selector_layout.addWidget(self.detail_view)
-        left_layout.addWidget(selector_group, 3)
+        left_body_layout.addWidget(selector_group)
+        left_body_layout.addStretch(1)
 
         run_row = QHBoxLayout()
         self.run_selected_btn = QPushButton("Run selected")
@@ -326,8 +375,12 @@ class UdsObserverGui(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        right.setMinimumWidth(520)
         splitter.addWidget(right)
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         right_layout.addWidget(self.tabs, 1)
 
         self.live_log_view = self._make_log_view()
@@ -345,8 +398,12 @@ class UdsObserverGui(QMainWindow):
         log_buttons.addStretch(1)
         right_layout.addLayout(log_buttons)
 
-        splitter.setSizes([500, 860])
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([430, 930])
 
+        self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.add_cfg_btn.clicked.connect(self.add_config_file)
         self.remove_cfg_btn.clicked.connect(self.remove_config_file)
         self.reload_btn.clicked.connect(self.reload_config_and_cases)
@@ -365,6 +422,25 @@ class UdsObserverGui(QMainWindow):
         view.setReadOnly(True)
         view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         return view
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_F11:
+            self.toggle_fullscreen()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            self.toggle_fullscreen()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+            self.fullscreen_btn.setText("Full screen")
+        else:
+            self.showFullScreen()
+            self.fullscreen_btn.setText("Exit full screen")
 
     def add_config_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Add YAML config/testcase", str(ROOT), "YAML files (*.yaml *.yml)")
