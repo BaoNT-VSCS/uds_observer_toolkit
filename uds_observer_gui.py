@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -234,9 +235,11 @@ class UdsObserverGui(QMainWindow):
         self.testcase_overrides: Dict[str, Dict[str, Any]] = {}
         self.param_widgets: Dict[str, QWidget] = {}
         self.param_rows: Dict[str, QWidget] = {}
+        self.param_row_layouts: Dict[str, QFormLayout] = {}
         self.current_validation: List[ValidationMessage] = []
         self._updating_ui = False
         self.process: Optional[QProcess] = None
+        self.can_config_process: Optional[QProcess] = None
         self.last_log_dir: Optional[Path] = None
         self._build_ui()
         self.reload_config_and_cases()
@@ -317,6 +320,14 @@ class UdsObserverGui(QMainWindow):
         target_layout.addRow("Channel", self.channel_edit)
         target_layout.addRow("TX ID", self.txid_edit)
         target_layout.addRow("RX ID", self.rxid_edit)
+        target_buttons = QHBoxLayout()
+        self.reset_target_btn = QPushButton("Reset target")
+        self.configure_can_btn = QPushButton("Configure CAN")
+        self.check_can_btn = QPushButton("Check CAN")
+        target_buttons.addWidget(self.reset_target_btn)
+        target_buttons.addWidget(self.configure_can_btn)
+        target_buttons.addWidget(self.check_can_btn)
+        target_layout.addRow("", target_buttons)
         left_body_layout.addWidget(target_group)
 
         self.advanced_target_group = QGroupBox("Advanced Target")
@@ -485,6 +496,9 @@ class UdsObserverGui(QMainWindow):
         self.remove_cfg_btn.clicked.connect(self.remove_config_file)
         self.reload_btn.clicked.connect(self.reload_config_and_cases)
         self.target_combo.currentTextChanged.connect(self.on_target_changed)
+        self.reset_target_btn.clicked.connect(lambda: self.populate_target_fields(self.target_combo.currentText()))
+        self.configure_can_btn.clicked.connect(self.configure_can_interface)
+        self.check_can_btn.clicked.connect(lambda: self.can_interface_is_up(show=True))
         for widget in (
             self.channel_edit,
             self.interface_edit,
@@ -540,6 +554,74 @@ class UdsObserverGui(QMainWindow):
         self.populate_target_fields(target_name)
         self.update_effective_preview()
 
+    def configure_can_interface(self) -> None:
+        if self.can_config_process is not None:
+            QMessageBox.information(self, "CAN config running", "CAN configuration is already running.")
+            return
+        script = ROOT / "can_config.sh"
+        if not script.exists():
+            QMessageBox.warning(self, "Missing can_config.sh", f"Cannot find {script}")
+            return
+        channel = self.channel_edit.text().strip() or "can0"
+        self.append_log(f"\n$ bash {script} {channel}\n")
+        self.can_config_process = QProcess(self)
+        self.can_config_process.setWorkingDirectory(str(ROOT))
+        self.can_config_process.readyReadStandardOutput.connect(self.read_can_config_stdout)
+        self.can_config_process.readyReadStandardError.connect(self.read_can_config_stderr)
+        self.can_config_process.finished.connect(self.can_config_finished)
+        self.can_config_process.start("bash", [str(script), channel])
+        if not self.can_config_process.waitForStarted(3000):
+            self.append_log("Failed to start can_config.sh. Run it manually in a terminal.\n")
+            self.can_config_process = None
+
+    def read_can_config_stdout(self) -> None:
+        if not self.can_config_process:
+            return
+        text = bytes(self.can_config_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        self.append_log(text, raw=True)
+
+    def read_can_config_stderr(self) -> None:
+        if not self.can_config_process:
+            return
+        text = bytes(self.can_config_process.readAllStandardError()).decode("utf-8", errors="replace")
+        self.append_log(text, raw=True)
+
+    def can_config_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
+        status = "normal" if exit_status == QProcess.ExitStatus.NormalExit else "crashed"
+        self.append_log(f"\n[can_config finished] exit_code={exit_code} status={status}\n")
+        self.can_config_process = None
+        self.can_interface_is_up(show=True)
+
+    def can_interface_is_up(self, *, show: bool = False) -> bool:
+        interface = self.interface_edit.text().strip() or "socketcan"
+        if interface not in {"socketcan", "socketcan_native"}:
+            return True
+        channel = self.channel_edit.text().strip() or "can0"
+        try:
+            result = subprocess.run(
+                ["ip", "-details", "link", "show", channel],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except FileNotFoundError:
+            if show:
+                self.append_log("Cannot check SocketCAN: missing Linux 'ip' command.\n")
+            return False
+        except subprocess.TimeoutExpired:
+            if show:
+                self.append_log(f"Timed out checking {channel}.\n")
+            return False
+        output = (result.stdout or result.stderr or "").strip()
+        if show:
+            self.append_log(f"\n$ ip -details link show {channel}\n{output}\n")
+        if result.returncode != 0:
+            return False
+        first_line = output.splitlines()[0] if output else ""
+        flags = first_line.split("<", 1)[1].split(">", 1)[0].split(",") if "<" in first_line and ">" in first_line else []
+        return "UP" in flags
+
     def on_testcase_changed(self) -> None:
         if self._updating_ui:
             return
@@ -574,6 +656,7 @@ class UdsObserverGui(QMainWindow):
         tc = self.current_testcase()
         self.param_widgets = {}
         self.param_rows = {}
+        self.param_row_layouts = {}
         self.clear_layout(self.parameters_layout)
         self.clear_layout(self.advanced_params_layout)
         if not tc:
@@ -598,6 +681,7 @@ class UdsObserverGui(QMainWindow):
         layout.addRow(str(field.get("label", key)), row)
         self.param_widgets[key] = widget
         self.param_rows[key] = row
+        self.param_row_layouts[key] = layout
         help_text = str(field.get("help") or "")
         if help_text:
             widget.setToolTip(help_text)
@@ -658,11 +742,10 @@ class UdsObserverGui(QMainWindow):
                 else:
                     visible = visible and actual == expected
             row.setVisible(visible)
-            for layout in (self.parameters_layout, self.advanced_params_layout):
-                try:
-                    layout.setRowVisible(row, visible)
-                except Exception:
-                    pass
+            layout = self.param_row_layouts.get(key)
+            if layout is not None:
+                layout.setRowVisible(row, visible)
+        self.set_advanced_params_visible(self.advanced_params_group.isChecked())
 
     def field_schema_by_key(self, key: str) -> Dict[str, Any]:
         tc = self.current_testcase()
@@ -985,10 +1068,17 @@ class UdsObserverGui(QMainWindow):
     def populate_target_fields(self, target_name: str) -> None:
         targets = self.config.get("targets") or {}
         target = targets.get(target_name) or {}
+        self.txid_edit.blockSignals(True)
+        self.rxid_edit.blockSignals(True)
+        self.extended_check.blockSignals(True)
         self.txid_edit.setText(hex_text(target.get("txid", "0x7E0"), width=3))
         self.rxid_edit.setText(hex_text(target.get("rxid", "0x7E8"), width=3))
         if "extended_id" in target:
             self.extended_check.setChecked(bool(target.get("extended_id")))
+        self.txid_edit.blockSignals(False)
+        self.rxid_edit.blockSignals(False)
+        self.extended_check.blockSignals(False)
+        self.update_effective_preview()
 
     def populate_cases(self) -> None:
         rows: List[Dict[str, Any]] = []
@@ -1103,6 +1193,13 @@ class UdsObserverGui(QMainWindow):
         testcases = self.selected_testcases(selected_only)
         if not testcases:
             QMessageBox.warning(self, "No testcase selected", "Select at least one testcase or use Run all.")
+            return
+        if not self.dry_run_check.isChecked() and not self.can_interface_is_up(show=True):
+            QMessageBox.warning(
+                self,
+                "CAN not ready",
+                "SocketCAN is not ready. Click Configure CAN, or run: bash can_config.sh can0",
+            )
             return
         validation: List[ValidationMessage] = []
         for tc in testcases:
