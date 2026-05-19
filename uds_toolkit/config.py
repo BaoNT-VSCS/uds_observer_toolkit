@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 import yaml
 
+from .testcase_metadata import normalize_testcase_metadata
 from .utils import parse_byte, parse_can_id, parse_hex_int
 
 
@@ -42,6 +43,15 @@ def load_yaml(path: str | Path) -> Dict[str, Any]:
         data = yaml.safe_load(fh) or {}
     if not isinstance(data, dict):
         raise ConfigError(f"YAML root must be a mapping: {p}")
+    if isinstance(data.get("testcases"), list):
+        source = (Path("testcases") / p.name).as_posix() if p.parent.name == "testcases" else str(p)
+        normalized = []
+        for item in data["testcases"]:
+            if isinstance(item, dict):
+                normalized.append(normalize_testcase_metadata(item, source_yaml=source))
+            else:
+                normalized.append(item)
+        data["testcases"] = normalized
     return data
 
 
@@ -156,5 +166,5 @@ def get_testcases(config: Mapping[str, Any]) -> List[Dict[str, Any]]:
             raise ConfigError(f"testcase #{idx} requires name")
         if not item.get("type"):
             raise ConfigError(f"testcase '{item.get('name')}' requires type")
-        out.append(item)
+        out.append(normalize_testcase_metadata(item))
     return out

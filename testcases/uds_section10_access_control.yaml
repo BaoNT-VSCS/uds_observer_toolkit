@@ -1,0 +1,172 @@
+# Section 10 UDS access-control training/security probes.
+# Authorized bench/simulator/owned ECU testing only.
+# Destructive services are intentionally not confirmed in these templates.
+
+safety:
+  authorized: false
+
+testcases:
+  - name: uds20_ecu_reset_precondition
+    test_id: "UDS-20"
+    title: "Missing Pre-conditions For ECU Reset"
+    group: "Section 10 - Access Control"
+    category: "Access Control"
+    mode: "ecu-reset-precondition"
+    objective: "Check whether ECU Reset is accepted without required preconditions or authorization."
+    expected_behavior: "ECU should reject reset with an acceptable NRC."
+    threat_condition: "ECU accepts reset without required preconditions."
+    safety_level: "disruptive"
+    destructive_confirm_required: true
+    type: uds_access_control_probe
+    target: ecu1
+    service: "0x11"
+    subfunction: "0x01"
+    session_flow: [0x01]
+    security_access_required: false
+    destructive_confirm: false
+    requests:
+      - step: ecu-reset-hardreset-without-preconditions
+        service: 0x11
+        payload: "11 01"
+        expected_positive_sid: 0x51
+        acceptable_nrcs: [0x22, 0x24, 0x31, 0x33, 0x7E, 0x7F]
+        threat_if_positive: true
+        check_subfn: true
+        notes: "Threat if ECU accepts reset without required preconditions."
+
+  - name: uds21_unauthenticated_wdbi
+    test_id: "UDS-21"
+    title: "Unauthenticated WriteDataByIdentifier"
+    group: "Section 10 - Access Control"
+    category: "Access Control"
+    mode: "unauthenticated-wdbi"
+    objective: "Check whether WriteDataByIdentifier is accepted without SecurityAccess."
+    expected_behavior: "ECU should deny the write request with an acceptable NRC."
+    threat_condition: "ECU accepts DID write without authorization."
+    safety_level: "disruptive"
+    destructive_confirm_required: true
+    type: uds_access_control_probe
+    target: ecu1
+    service: "0x2E"
+    session_flow: [0x03]
+    security_access_required: false
+    destructive_confirm: false
+    requests:
+      - step: write-did-without-security
+        service: 0x2E
+        payload: "2E F1 90 00"
+        expected_positive_sid: 0x6E
+        acceptable_nrcs: [0x22, 0x24, 0x31, 0x33, 0x13, 0x7E, 0x7F]
+        threat_if_positive: true
+        check_subfn: false
+        notes: "Default placeholder DID. User must replace with authorized test DID before real testing."
+
+  - name: uds22_read_sensitive_did_without_security
+    test_id: "UDS-22"
+    title: "Read Sensitive Information Without SecurityAccess"
+    group: "Section 10 - Access Control"
+    category: "Access Control"
+    mode: "sensitive-did-read-without-security"
+    objective: "Check whether sensitive DID data is readable without SecurityAccess."
+    expected_behavior: "ECU should deny sensitive DID access or data should be redacted in evidence."
+    threat_condition: "Sensitive DID data is disclosed without SecurityAccess."
+    safety_level: "read-only"
+    destructive_confirm_required: false
+    type: uds_access_control_probe
+    target: ecu1
+    service: "0x22"
+    session_flow: [0x03]
+    security_access_required: false
+    destructive_confirm: false
+    requests:
+      - step: read-sensitive-did-without-security
+        service: 0x22
+        payload: "22 F1 90"
+        expected_positive_sid: 0x62
+        acceptable_nrcs: [0x22, 0x24, 0x31, 0x33, 0x13, 0x7E, 0x7F]
+        threat_if_positive: true
+        check_subfn: false
+        redact_response_data: true
+        notes: "Threat if sensitive DID is readable without SecurityAccess."
+
+  - name: uds23_unauthenticated_request_download
+    test_id: "UDS-23"
+    title: "Unauthenticated RequestDownload"
+    group: "Section 10 - Access Control"
+    category: "Access Control"
+    mode: "unauthenticated-request-download"
+    objective: "Check whether RequestDownload is accepted without SecurityAccess."
+    expected_behavior: "ECU should deny download initiation with an acceptable NRC."
+    threat_condition: "ECU accepts download initiation without authorization."
+    safety_level: "disruptive"
+    destructive_confirm_required: true
+    type: uds_access_control_probe
+    target: ecu1
+    service: "0x34"
+    session_flow: [0x03]
+    security_access_required: false
+    destructive_confirm: false
+    requests:
+      - step: request-download-without-security
+        service: 0x34
+        payload: "34 00 44 00 00 00 00 00 00 00 10"
+        expected_positive_sid: 0x74
+        acceptable_nrcs: [0x22, 0x24, 0x31, 0x33, 0x13, 0x70, 0x7E, 0x7F]
+        threat_if_positive: true
+        check_subfn: false
+        notes: "Default placeholder address/size. Must be reviewed before real bench testing."
+
+  - name: uds24_unauthenticated_request_upload
+    test_id: "UDS-24"
+    title: "Unauthenticated RequestUpload"
+    group: "Section 10 - Access Control"
+    category: "Access Control"
+    mode: "unauthenticated-request-upload"
+    objective: "Check whether RequestUpload is accepted without SecurityAccess."
+    expected_behavior: "ECU should deny upload initiation with an acceptable NRC."
+    threat_condition: "ECU accepts upload initiation without authorization."
+    safety_level: "disruptive"
+    destructive_confirm_required: true
+    type: uds_access_control_probe
+    target: ecu1
+    service: "0x35"
+    session_flow: [0x03]
+    security_access_required: false
+    destructive_confirm: false
+    requests:
+      - step: request-upload-without-security
+        service: 0x35
+        payload: "35 00 44 00 00 00 00 00 00 00 10"
+        expected_positive_sid: 0x75
+        acceptable_nrcs: [0x22, 0x24, 0x31, 0x33, 0x13, 0x70, 0x7E, 0x7F]
+        threat_if_positive: true
+        check_subfn: false
+        redact_response_data: true
+        notes: "Threat if upload is accepted without SecurityAccess."
+
+  - name: uds25_unauthenticated_communication_control
+    test_id: "UDS-25"
+    title: "Unauthenticated CommunicationControl"
+    group: "Section 10 - Access Control"
+    category: "Access Control"
+    mode: "unauthenticated-communication-control"
+    objective: "Check whether CommunicationControl is accepted without authorization."
+    expected_behavior: "ECU should deny communication control with an acceptable NRC."
+    threat_condition: "ECU accepts communication control without authorization."
+    safety_level: "disruptive"
+    destructive_confirm_required: true
+    type: uds_access_control_probe
+    target: ecu1
+    service: "0x28"
+    session_flow: [0x03]
+    security_access_required: false
+    destructive_confirm: false
+    requests:
+      - step: communication-control-without-security
+        service: 0x28
+        payload: "28 00 03"
+        expected_positive_sid: 0x68
+        acceptable_nrcs: [0x22, 0x24, 0x31, 0x33, 0x13, 0x7E, 0x7F]
+        threat_if_positive: true
+        check_subfn: true
+        notes: "Threat if ECU accepts communication control without authorization."

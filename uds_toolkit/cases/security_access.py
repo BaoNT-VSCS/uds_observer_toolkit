@@ -39,7 +39,7 @@ def _record(ctx: CaseContext, step: str, result: UdsResult) -> None:
 
 class SecurityAccessCase:
     def run(self, client: UdsClient, ctx: CaseContext) -> int:
-        mode = str(_cfg(ctx, "mode", "request_seed_only")).replace("-", "_")
+        mode = str(_cfg(ctx, "security_mode", _cfg(ctx, "mode", "request_seed_only"))).replace("-", "_")
         if mode not in SECURITY_MODES:
             raise ValueError(f"unsupported security_access mode: {mode}")
 

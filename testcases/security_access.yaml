@@ -3,32 +3,75 @@
 
 testcases:
   - name: sa_request_seed_only
+    title: "RequestSeed Baseline Observation"
+    group: "Group C - SecurityAccess Baseline"
+    category: "SecurityAccess"
+    mode: "request-seed-only"
+    objective: "Request one seed as a baseline SecurityAccess observation."
+    expected_behavior: "ECU should return a valid seed or an appropriate NRC for the active session."
+    threat_condition: "Unexpected seed behavior requires review against the SecurityAccess policy."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: request_seed_only
+    service: "0x27"
+    subfunction: "0x01"
+    security_mode: request_seed_only
     seed_subfn: 0x01
 
   - name: sa_key_without_seed
+    test_id: "UDS-13"
+    title: "SendKey Without Prior RequestSeed"
+    group: "Group C - SecurityAccess Sequence Enforcement"
+    category: "SecurityAccess"
+    mode: "security-access-sequence"
+    objective: "Send a key subfunction before requesting a seed."
+    expected_behavior: "ECU should reject the sequence with an NRC such as requestSequenceError or securityAccessDenied."
+    threat_condition: "ECU accepts SendKey without a matching seed challenge."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: key_without_seed
+    service: "0x27"
+    subfunction: "0x02"
+    security_mode: key_without_seed
     seed_subfn: 0x01
     key_subfn: 0x02
     key_policy: format-random
 
   - name: sa_seed_timeout_key
+    test_id: "UDS-14"
+    title: "SendKey After Seed Timeout"
+    group: "Group C - SecurityAccess Sequence Enforcement"
+    category: "SecurityAccess"
+    mode: "security-access-timeout"
+    objective: "Request a seed, wait for the configured timeout window, then send a key."
+    expected_behavior: "ECU should reject stale seed/key use after timeout."
+    threat_condition: "ECU accepts a key after the seed challenge should have expired."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: seed_timeout_key
+    service: "0x27"
+    subfunction: "0x02"
+    security_mode: seed_timeout_key
     seed_subfn: 0x01
     key_subfn: 0x02
     key_policy: invalid-bitflip
     s3_wait: 6.0
 
   - name: sa_one_seed_many_keys
+    test_id: "UDS-16"
+    title: "Multiple SendKey Attempts For One Seed"
+    group: "Group C - SecurityAccess Attempt Handling"
+    category: "SecurityAccess"
+    mode: "one-seed-many-keys"
+    objective: "Check whether one seed can be reused for multiple key attempts."
+    expected_behavior: "ECU should enforce retry limits and invalidate stale attempts as required."
+    threat_condition: "One seed permits repeated key guesses without proper lockout."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: one_seed_many_keys
+    service: "0x27"
+    subfunction: "0x02"
+    security_mode: one_seed_many_keys
     seed_subfn: 0x01
     key_subfn: 0x02
     key_policy: invalid-bitflip
@@ -36,18 +79,40 @@ testcases:
     stop_on_positive_unlock: true
 
   - name: sa_seed_key_exchange_loop
+    test_id: "UDS-17"
+    title: "SecurityAccess Exchange Attempt Limit"
+    group: "Group C - SecurityAccess Attempt Handling"
+    category: "SecurityAccess"
+    mode: "seed-key-exchange-limit"
+    objective: "Repeat seed/key exchanges to observe retry limiting."
+    expected_behavior: "ECU should enforce attempt limits and delay/lockout policy."
+    threat_condition: "ECU allows unlimited repeated SecurityAccess attempts."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: seed_key_exchange_loop
+    service: "0x27"
+    subfunction: "0x01/0x02"
+    security_mode: seed_key_exchange_loop
     seed_subfn: 0x01
     key_subfn: 0x02
     key_policy: invalid-bitflip
     attempts: 5
 
   - name: sa_penalty_then_seed
+    test_id: "UDS-18"
+    title: "Penalty State Then RequestSeed"
+    group: "Group C - SecurityAccess Penalty Handling"
+    category: "SecurityAccess"
+    mode: "penalty-then-seed"
+    objective: "Trigger penalty handling and then request another seed."
+    expected_behavior: "ECU should enforce required delay or lockout before new seeds."
+    threat_condition: "ECU issues new seeds immediately during penalty state."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: penalty_then_seed
+    service: "0x27"
+    subfunction: "0x01"
+    security_mode: penalty_then_seed
     seed_subfn: 0x01
     key_subfn: 0x02
     key_policy: invalid-bitflip
@@ -55,8 +120,19 @@ testcases:
     penalty_probe_delay: 0.05
 
   - name: sa_multi_seed_response
+    test_id: "UDS-19"
+    title: "Multiple Seed Responses To One Request"
+    group: "Group C - SecurityAccess Response Handling"
+    category: "SecurityAccess"
+    mode: "multi-seed-response"
+    objective: "Observe whether one RequestSeed generates multiple seed responses."
+    expected_behavior: "ECU should send one well-formed seed response per request."
+    threat_condition: "ECU emits multiple or inconsistent seed responses."
+    safety_level: "probing"
     type: security_access
     target: ecu1
-    mode: multi_seed_response
+    service: "0x27"
+    subfunction: "0x01"
+    security_mode: multi_seed_response
     seed_subfn: 0x01
     capture_window: 1.0

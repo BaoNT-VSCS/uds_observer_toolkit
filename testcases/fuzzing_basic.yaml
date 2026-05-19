@@ -6,6 +6,15 @@ safety:
 
 testcases:
   - name: fuzz_arbids_tester_present
+    test_id: "RECON-01"
+    title: "Arbitration ID Discovery"
+    group: "Recon"
+    category: "Reconnaissance"
+    mode: "arb-id-fuzzer"
+    objective: "Probe a bounded CAN arbitration ID range for diagnostic responses."
+    expected_behavior: "Only authorized lab targets should respond as expected."
+    threat_condition: "Unexpected diagnostic endpoints are discoverable."
+    safety_level: "probing"
     type: arb_id_fuzzer
     target: ecu1
     txid_range: 0x700-0x70F
@@ -16,6 +25,15 @@ testcases:
     collect_limit_per_id: 5
 
   - name: fuzz_services_known_target
+    test_id: "RECON-02"
+    title: "UDS Service Discovery"
+    group: "Recon"
+    category: "Reconnaissance"
+    mode: "service-fuzzer"
+    objective: "Probe a bounded UDS service range on a known target."
+    expected_behavior: "Unsupported or unavailable services should be denied with NRCs."
+    threat_condition: "Unexpected services are exposed in the active session."
+    safety_level: "probing"
     type: service_fuzzer
     target: ecu1
     session_flow: [0x03]
@@ -24,6 +42,15 @@ testcases:
     delay: 0.05
 
   - name: fuzz_diag_sessions
+    test_id: "RECON-03"
+    title: "Diagnostic Session Subfunction Discovery"
+    group: "Recon"
+    category: "Reconnaissance"
+    mode: "subservice-fuzzer"
+    objective: "Probe diagnostic session control subfunctions in a bounded range."
+    expected_behavior: "Unsupported sessions should be denied with NRCs."
+    threat_condition: "Unexpected diagnostic sessions are exposed."
+    safety_level: "probing"
     type: subservice_fuzzer
     target: ecu1
     service: 0x10
@@ -32,6 +59,15 @@ testcases:
     delay: 0.05
 
   - name: fuzz_security_access_subfunctions
+    test_id: "RECON-03"
+    title: "SecurityAccess Subfunction Discovery"
+    group: "Recon"
+    category: "Reconnaissance"
+    mode: "subservice-fuzzer"
+    objective: "Probe SecurityAccess subfunctions in a bounded range."
+    expected_behavior: "Unsupported subfunctions should be denied with NRCs."
+    threat_condition: "Unexpected SecurityAccess levels are exposed."
+    safety_level: "probing"
     type: subservice_fuzzer
     target: ecu1
     session_flow: [0x03]
@@ -41,6 +77,15 @@ testcases:
     delay: 0.08
 
   - name: payload_regression_small
+    test_id: "UDS-05"
+    title: "Malformed Or Invalid Request NRC Behaviour"
+    group: "Group A - Basic Diagnostic Robustness"
+    category: "Fuzzing"
+    mode: "explicit-payload-regression"
+    objective: "Send a bounded set of known payloads to observe invalid request handling."
+    expected_behavior: "ECU should return appropriate NRCs and remain stable."
+    threat_condition: "Malformed or invalid requests cause unexpected positive responses or instability."
+    safety_level: "probing"
     type: payload_fuzzer
     target: ecu1
     session_flow: [0x03]

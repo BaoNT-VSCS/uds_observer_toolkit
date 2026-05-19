@@ -5,6 +5,7 @@ from typing import Dict, Type
 from .cases.security_access import SecurityAccessCase
 from .cases.samplers import SeedSamplerCrossSession, SeedSamplerSameSession
 from .cases.fuzzing import ArbIdFuzzer, PayloadFuzzer, ServiceFuzzer, SubserviceFuzzer
+from .cases.access_control import UdsAccessControlProbe
 
 
 CASE_REGISTRY = {
@@ -15,6 +16,7 @@ CASE_REGISTRY = {
     "subservice_fuzzer": SubserviceFuzzer,
     "payload_fuzzer": PayloadFuzzer,
     "arb_id_fuzzer": ArbIdFuzzer,
+    "uds_access_control_probe": UdsAccessControlProbe,
 }
 
 

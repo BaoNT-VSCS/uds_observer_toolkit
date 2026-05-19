@@ -1,14 +1,36 @@
 testcases:
   - name: seed_same_session_20
+    test_ids: ["UDS-11", "UDS-12", "UDS-15"]
+    title: "Same-session seed sampling / seed length / RequestSeed limit"
+    group: "Group B - Same Session Seed Behaviour"
+    category: "Seed Sampling"
+    mode: "same-session-seed-sampling"
+    objective: "Sample repeated RequestSeed responses in one active diagnostic session."
+    expected_behavior: "Seeds should have sufficient length, entropy, and rate limiting."
+    threat_condition: "Weak, repeated, short, or unlimited seeds can weaken SecurityAccess."
+    safety_level: "probing"
     type: seed_sampler_same_session
     target: ecu1
+    service: "0x27"
+    subfunction: "0x01"
     seed_subfn: 0x01
     samples: 20
     delay: 0.20
 
   - name: seed_cross_session_20
+    test_id: "UDS-10"
+    title: "Guessable Seeds Generated Across Different Sessions"
+    group: "Group A - First Seed Across Sessions"
+    category: "Seed Sampling"
+    mode: "cross-session-seed-sampling"
+    objective: "Collect first seeds across diagnostic session boundaries."
+    expected_behavior: "Seeds should not be predictable or trivially repeated across sessions."
+    threat_condition: "Repeated or guessable seeds enable easier SecurityAccess bypass analysis."
+    safety_level: "probing"
     type: seed_sampler_cross_session
     target: ecu1
+    service: "0x27"
+    subfunction: "0x01"
     seed_subfn: 0x01
     samples: 20
     session_flow: [0x03]

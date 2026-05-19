@@ -5,11 +5,6 @@ UDS Observer Toolkit GUI
 Single GUI entry point for the config-driven UDS observer toolkit.
 Run:
     python3 uds_observer_gui.py
-
-The GUI keeps the toolkit extensible: new test cases are still added as YAML
-under testcases/, then loaded/reloaded from this window. Execution is delegated
-to run_udstk.py so the GUI and CLI share the same runner, logger, ISO-TP, UDS
-client, and testcase plugins.
 """
 from __future__ import annotations
 
@@ -37,7 +32,6 @@ try:
         QFileDialog,
         QGroupBox,
         QHBoxLayout,
-        QHeaderView,
         QLabel,
         QLineEdit,
         QListWidget,
@@ -45,8 +39,7 @@ try:
         QMessageBox,
         QPushButton,
         QSplitter,
-        QTableWidget,
-        QTableWidgetItem,
+        QTabWidget,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -55,15 +48,21 @@ except ImportError as exc:  # pragma: no cover - startup guard
     print("Missing dependency: PySide6. Install with: pip install -r requirements.txt", file=sys.stderr)
     raise SystemExit(2) from exc
 
-APP_TITLE = "UDS Observer Toolkit"
+from uds_toolkit.testcase_metadata import normalize_testcase_metadata, sort_testcases_by_report_order
 
+
+APP_TITLE = "UDS Observer Toolkit"
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_FILES = [
     ROOT / "configs" / "default.yaml",
     ROOT / "testcases" / "security_access.yaml",
     ROOT / "testcases" / "seed_sampling.yaml",
     ROOT / "testcases" / "fuzzing_basic.yaml",
+    ROOT / "testcases" / "uds_section10_access_control.yaml",
 ]
+
+CATEGORIES = ["All", "Reconnaissance", "SecurityAccess", "Seed Sampling", "Access Control", "Fuzzing"]
+GROUPS = ["All", "Group A", "Group B", "Group C", "Group D", "Section 10", "Recon"]
 
 STYLE = """
 QWidget {
@@ -86,7 +85,7 @@ QGroupBox::title {
     color: #7db3ff;
     font-weight: bold;
 }
-QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit {
+QLineEdit, QComboBox, QListWidget, QTextEdit {
     background: #0b0f14;
     border: 1px solid #2a3340;
     border-radius: 4px;
@@ -95,6 +94,9 @@ QLineEdit, QComboBox, QListWidget, QTableWidget, QTextEdit {
 }
 QLineEdit, QComboBox {
     padding: 4px 6px;
+}
+QTextEdit {
+    padding: 6px;
 }
 QPushButton {
     background: #202938;
@@ -107,15 +109,16 @@ QPushButton:hover { background: #2b5f9e; }
 QPushButton:disabled { color: #697386; background: #141922; }
 QPushButton#runButton { background: #10351f; border-color: #2f8f53; color: #81e6a5; font-weight: bold; }
 QPushButton#stopButton { background: #3a1111; border-color: #8f2f2f; color: #ff9c9c; font-weight: bold; }
-QHeaderView::section {
-    background: #1c2430;
-    color: #9ba7b8;
-    border: 0;
-    border-right: 1px solid #2a3340;
-    padding: 5px;
-}
 QCheckBox { spacing: 6px; }
 QSplitter::handle { background: #2a3340; }
+QTabWidget::pane { border: 1px solid #2a3340; background: #0b0f14; }
+QTabBar::tab {
+    background: #1c2430;
+    color: #9ba7b8;
+    padding: 7px 10px;
+    border: 1px solid #2a3340;
+}
+QTabBar::tab:selected { color: #d7dde7; background: #243044; }
 """
 
 
@@ -128,7 +131,6 @@ def load_yaml(path: Path) -> Dict[str, Any]:
 
 
 def deep_merge(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
-    """Merge YAML configs; concatenate testcase lists instead of overwriting them."""
     out = copy.deepcopy(base)
     for key, value in override.items():
         if key == "testcases" and isinstance(value, list):
@@ -182,13 +184,12 @@ def hex_text(value: Any, width: int = 2) -> str:
     return f"0x{n:0{width}X}"
 
 
-
-
 def display_path(path: Path) -> str:
     try:
-        return str(path.relative_to(ROOT))
+        return path.relative_to(ROOT).as_posix()
     except ValueError:
         return str(path)
+
 
 def session_text(value: Any) -> str:
     if not value:
@@ -205,9 +206,11 @@ class UdsObserverGui(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1320, 820)
+        self.resize(1360, 840)
         self.config_files: List[Path] = [p for p in DEFAULT_CONFIG_FILES if p.exists()]
         self.config: Dict[str, Any] = {}
+        self.all_cases: List[Dict[str, Any]] = []
+        self.filtered_cases: List[Dict[str, Any]] = []
         self.process: Optional[QProcess] = None
         self.last_log_dir: Optional[Path] = None
         self._build_ui()
@@ -221,7 +224,7 @@ class UdsObserverGui(QMainWindow):
         header = QHBoxLayout()
         title = QLabel("UDS Observer Toolkit")
         title.setFont(QFont("Consolas", 16, QFont.Weight.Bold))
-        subtitle = QLabel("single GUI entrypoint / config-driven testcase runner")
+        subtitle = QLabel("official UDS testcase workflow / evidence-focused runner")
         subtitle.setStyleSheet("color:#8b96a8")
         header.addWidget(title)
         header.addWidget(subtitle)
@@ -285,6 +288,25 @@ class UdsObserverGui(QMainWindow):
             options_layout.addWidget(cb)
         left_layout.addWidget(options_group, 1)
 
+        selector_group = QGroupBox("Testcase selector")
+        selector_layout = QVBoxLayout(selector_group)
+        self.category_filter = QComboBox()
+        self.category_filter.addItems(CATEGORIES)
+        self.group_filter = QComboBox()
+        self.group_filter.addItems(GROUPS)
+        for label, widget in (("Category", self.category_filter), ("Group", self.group_filter)):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label), 0)
+            row.addWidget(widget, 1)
+            selector_layout.addLayout(row)
+        self.testcase_combo = QComboBox()
+        selector_layout.addWidget(self.testcase_combo)
+        self.detail_view = QTextEdit()
+        self.detail_view.setReadOnly(True)
+        self.detail_view.setMinimumHeight(190)
+        selector_layout.addWidget(self.detail_view)
+        left_layout.addWidget(selector_group, 3)
+
         run_row = QHBoxLayout()
         self.run_selected_btn = QPushButton("Run selected")
         self.run_selected_btn.setObjectName("runButton")
@@ -301,61 +323,48 @@ class UdsObserverGui(QMainWindow):
         self.open_logs_btn = QPushButton("Open last log folder")
         self.open_logs_btn.setEnabled(False)
         left_layout.addWidget(self.open_logs_btn)
-        left_layout.addStretch(1)
-
-        center = QWidget()
-        center_layout = QVBoxLayout(center)
-        splitter.addWidget(center)
-
-        case_group = QGroupBox("Test cases")
-        case_layout = QVBoxLayout(case_group)
-        case_btns = QHBoxLayout()
-        self.select_all_btn = QPushButton("Select all")
-        self.select_none_btn = QPushButton("Select none")
-        case_btns.addWidget(self.select_all_btn)
-        case_btns.addWidget(self.select_none_btn)
-        case_btns.addStretch(1)
-        case_layout.addLayout(case_btns)
-        self.case_table = QTableWidget(0, 5)
-        self.case_table.setHorizontalHeaderLabels(["Run", "Name", "Type", "Target", "Source"])
-        self.case_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.case_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.case_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.case_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.case_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.case_table.setAlternatingRowColors(True)
-        case_layout.addWidget(self.case_table)
-        center_layout.addWidget(case_group, 1)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
         splitter.addWidget(right)
-        log_group = QGroupBox("Live output")
-        log_layout = QVBoxLayout(log_group)
+        self.tabs = QTabWidget()
+        right_layout.addWidget(self.tabs, 1)
+
+        self.live_log_view = self._make_log_view()
+        self.can_view = self._make_log_view()
+        self.verdict_view = self._make_log_view()
+        self.evidence_view = self._make_log_view()
+        self.tabs.addTab(self.live_log_view, "Live Output")
+        self.tabs.addTab(self.can_view, "CAN Frames / TX-RX")
+        self.tabs.addTab(self.verdict_view, "Verdict Summary")
+        self.tabs.addTab(self.evidence_view, "Evidence Notes / Step Details")
+
         log_buttons = QHBoxLayout()
-        self.clear_log_btn = QPushButton("Clear")
+        self.clear_log_btn = QPushButton("Clear evidence views")
         log_buttons.addWidget(self.clear_log_btn)
         log_buttons.addStretch(1)
-        log_layout.addLayout(log_buttons)
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        log_layout.addWidget(self.log_view)
-        right_layout.addWidget(log_group, 1)
+        right_layout.addLayout(log_buttons)
 
-        splitter.setSizes([360, 560, 520])
+        splitter.setSizes([500, 860])
 
         self.add_cfg_btn.clicked.connect(self.add_config_file)
         self.remove_cfg_btn.clicked.connect(self.remove_config_file)
         self.reload_btn.clicked.connect(self.reload_config_and_cases)
         self.target_combo.currentTextChanged.connect(self.populate_target_fields)
-        self.select_all_btn.clicked.connect(lambda: self.set_all_cases_checked(True))
-        self.select_none_btn.clicked.connect(lambda: self.set_all_cases_checked(False))
+        self.category_filter.currentTextChanged.connect(self.apply_filters)
+        self.group_filter.currentTextChanged.connect(self.apply_filters)
+        self.testcase_combo.currentIndexChanged.connect(self.update_detail_card)
         self.run_selected_btn.clicked.connect(lambda: self.start_run(selected_only=True))
         self.run_all_btn.clicked.connect(lambda: self.start_run(selected_only=False))
         self.stop_btn.clicked.connect(self.stop_process)
         self.open_logs_btn.clicked.connect(self.open_last_log_dir)
-        self.clear_log_btn.clicked.connect(self.log_view.clear)
+        self.clear_log_btn.clicked.connect(self.clear_evidence_views)
+
+    def _make_log_view(self) -> QTextEdit:
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        return view
 
     def add_config_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Add YAML config/testcase", str(ROOT), "YAML files (*.yaml *.yml)")
@@ -383,7 +392,7 @@ class UdsObserverGui(QMainWindow):
             return
         self.populate_targets()
         self.populate_cases()
-        self.append_log(f"Loaded {len(self.config_files)} config file(s), {self.case_table.rowCount()} testcase(s).")
+        self.append_log(f"Loaded {len(self.config_files)} config file(s), {len(self.all_cases)} testcase(s).")
 
     def populate_targets(self) -> None:
         self.target_combo.blockSignals(True)
@@ -412,10 +421,7 @@ class UdsObserverGui(QMainWindow):
             self.extended_check.setChecked(bool(target.get("extended_id")))
 
     def populate_cases(self) -> None:
-        self.case_table.setRowCount(0)
-        # Keep the source file visible by re-reading each testcase file directly.
-        rows: List[tuple[Dict[str, Any], str]] = []
-        base_without_cases: Dict[str, Any] = {}
+        rows: List[Dict[str, Any]] = []
         for path in self.config_files:
             try:
                 data = load_yaml(path)
@@ -424,40 +430,87 @@ class UdsObserverGui(QMainWindow):
             if isinstance(data.get("testcases"), list):
                 for tc in data["testcases"]:
                     if isinstance(tc, dict):
-                        rows.append((copy.deepcopy(tc), display_path(path)))
-            else:
-                base_without_cases = deep_merge(base_without_cases, data)
+                        rows.append(normalize_testcase_metadata(tc, source_yaml=display_path(path)))
         if not rows:
             for tc in self.config.get("testcases", []):
-                rows.append((copy.deepcopy(tc), "merged config"))
+                if isinstance(tc, dict):
+                    rows.append(normalize_testcase_metadata(tc, source_yaml=str(tc.get("source_yaml", "merged config"))))
+        self.all_cases = sort_testcases_by_report_order(rows)
+        self.apply_filters()
 
-        for tc, source in rows:
-            row = self.case_table.rowCount()
-            self.case_table.insertRow(row)
-            chk = QTableWidgetItem("")
-            chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            chk.setCheckState(Qt.CheckState.Unchecked)
-            chk.setData(Qt.ItemDataRole.UserRole, tc)
-            self.case_table.setItem(row, 0, chk)
-            self.case_table.setItem(row, 1, QTableWidgetItem(str(tc.get("name", ""))))
-            self.case_table.setItem(row, 2, QTableWidgetItem(str(tc.get("type", ""))))
-            self.case_table.setItem(row, 3, QTableWidgetItem(str(tc.get("target", self.config.get("default_target", "")))))
-            self.case_table.setItem(row, 4, QTableWidgetItem(source))
+    def apply_filters(self) -> None:
+        previous_name = self.current_testcase().get("name") if self.current_testcase() else ""
+        category = self.category_filter.currentText()
+        group = self.group_filter.currentText()
+        filtered: List[Dict[str, Any]] = []
+        for tc in self.all_cases:
+            if category != "All" and str(tc.get("category", "")) != category:
+                continue
+            if group != "All" and not str(tc.get("group", "")).startswith(group):
+                continue
+            filtered.append(tc)
+        self.filtered_cases = filtered
+        self.testcase_combo.blockSignals(True)
+        self.testcase_combo.clear()
+        for tc in self.filtered_cases:
+            self.testcase_combo.addItem(str(tc.get("display_name", tc.get("name", ""))), tc)
+        self.testcase_combo.blockSignals(False)
+        if previous_name:
+            for idx, tc in enumerate(self.filtered_cases):
+                if tc.get("name") == previous_name:
+                    self.testcase_combo.setCurrentIndex(idx)
+                    break
+        if self.testcase_combo.currentIndex() < 0 and self.filtered_cases:
+            self.testcase_combo.setCurrentIndex(0)
+        self.update_detail_card()
 
-    def set_all_cases_checked(self, checked: bool) -> None:
-        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        for row in range(self.case_table.rowCount()):
-            self.case_table.item(row, 0).setCheckState(state)
+    def current_testcase(self) -> Dict[str, Any]:
+        idx = self.testcase_combo.currentIndex()
+        if idx < 0:
+            return {}
+        data = self.testcase_combo.itemData(idx)
+        return copy.deepcopy(data) if isinstance(data, dict) else {}
+
+    def update_detail_card(self) -> None:
+        tc = self.current_testcase()
+        if not tc:
+            self.detail_view.setPlainText("No testcase available for the current filters.")
+            return
+        ids = tc.get("test_ids") or []
+        lines = [
+            f"Test ID(s): {', '.join(ids) if ids else 'UNMAPPED'}",
+            f"Title: {tc.get('title', '')}",
+            f"Internal name: {tc.get('internal_name', tc.get('name', ''))}",
+            f"Source YAML: {tc.get('source_yaml', '')}",
+            f"Service: {tc.get('service', '')}",
+            f"Subfunction: {tc.get('subfunction', '')}",
+            f"Mode: {tc.get('mode', '')}",
+            f"Target: {tc.get('target', self.config.get('default_target', ''))}",
+            f"Group: {tc.get('group', '')}",
+            f"Category: {tc.get('category', '')}",
+            f"Safety: {tc.get('safety_level', '')}",
+            f"Destructive confirm required: {bool(tc.get('destructive_confirm_required', False))}",
+            "",
+            "Objective:",
+            str(tc.get("objective", "")),
+            "",
+            "Expected behavior:",
+            str(tc.get("expected_behavior", "")),
+            "",
+            "Threat condition:",
+            str(tc.get("threat_condition", "")),
+        ]
+        if tc.get("metadata_warning"):
+            lines.extend(["", "Warning:", str(tc["metadata_warning"])])
+        if tc.get("safety_level") == "disruptive" and not bool(tc.get("destructive_confirm", False)):
+            lines.extend(["", "Safety guard:", "Real transmission is blocked until destructive_confirm: true is set in YAML."])
+        self.detail_view.setPlainText("\n".join(lines))
 
     def selected_testcases(self, selected_only: bool) -> List[Dict[str, Any]]:
-        out = []
-        for row in range(self.case_table.rowCount()):
-            item = self.case_table.item(row, 0)
-            if not selected_only or item.checkState() == Qt.CheckState.Checked:
-                tc = item.data(Qt.ItemDataRole.UserRole)
-                if isinstance(tc, dict):
-                    out.append(copy.deepcopy(tc))
-        return out
+        if selected_only:
+            tc = self.current_testcase()
+            return [tc] if tc else []
+        return [copy.deepcopy(tc) for tc in self.all_cases]
 
     def build_runtime_config(self, testcases: List[Dict[str, Any]]) -> Path:
         cfg = copy.deepcopy(self.config)
@@ -493,8 +546,20 @@ class UdsObserverGui(QMainWindow):
         if not testcases:
             QMessageBox.warning(self, "No testcase selected", "Select at least one testcase or use Run all.")
             return
-        has_fuzzer = any(str(tc.get("type", "")).endswith("fuzzer") for tc in testcases)
-        if has_fuzzer and not self.authorized_check.isChecked() and not self.dry_run_check.isChecked():
+        if not self.dry_run_check.isChecked():
+            disruptive = [tc for tc in testcases if tc.get("safety_level") == "disruptive" and not bool(tc.get("destructive_confirm", False))]
+            if disruptive:
+                QMessageBox.warning(
+                    self,
+                    "Destructive confirmation required",
+                    "Selected testcase is marked disruptive and destructive_confirm is false. Real transmission is refused.",
+                )
+                return
+        has_authorized_probe = any(
+            str(tc.get("type", "")).endswith("fuzzer") or str(tc.get("type", "")) == "uds_access_control_probe"
+            for tc in testcases
+        )
+        if has_authorized_probe and not self.authorized_check.isChecked() and not self.dry_run_check.isChecked():
             QMessageBox.warning(
                 self,
                 "Authorization required",
@@ -506,6 +571,11 @@ class UdsObserverGui(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Runtime config error", str(exc))
             return
+
+        if selected_only and testcases:
+            self.append_evidence_header(testcases[0])
+        else:
+            self.append_log(f"\n===== RUN ALL ({len(testcases)} testcases, sorted by report order) =====")
 
         args = [str(ROOT / "run_udstk.py"), "-c", str(runtime_config), "--runs-dir", str(ROOT / "runs")]
         if self.dry_run_check.isChecked():
@@ -536,6 +606,20 @@ class UdsObserverGui(QMainWindow):
             self.process = None
             self.set_running(False)
 
+    def append_evidence_header(self, tc: Mapping[str, Any]) -> None:
+        target = self.config.get("targets", {}).get(str(tc.get("target", self.config.get("default_target", "ecu1"))), {})
+        header = (
+            "\n"
+            f"===== {tc.get('display_name', tc.get('name'))} =====\n"
+            f"Internal name: {tc.get('internal_name', tc.get('name', ''))}\n"
+            f"Target: {tc.get('target', self.config.get('default_target', 'ecu1'))}\n"
+            f"TX/RX: {hex_text(target.get('txid', self.txid_edit.text()), 3)} -> {hex_text(target.get('rxid', self.rxid_edit.text()), 3)}\n"
+            f"Session flow: {session_text(tc.get('session_flow', target.get('session_flow', [])))}\n"
+            f"Mode: {tc.get('mode', tc.get('type', ''))}"
+        )
+        self.append_log(header)
+        self.append_evidence_note(header)
+
     def set_running(self, running: bool) -> None:
         self.run_selected_btn.setEnabled(not running)
         self.run_all_btn.setEnabled(not running)
@@ -547,6 +631,7 @@ class UdsObserverGui(QMainWindow):
             return
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         self.append_log(text, raw=True)
+        self.route_evidence_text(text)
         self.extract_log_dir(text)
 
     def read_stderr(self) -> None:
@@ -554,7 +639,18 @@ class UdsObserverGui(QMainWindow):
             return
         text = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
         self.append_log(text, raw=True)
+        self.route_evidence_text(text)
         self.extract_log_dir(text)
+
+    def route_evidence_text(self, text: str) -> None:
+        for line in text.splitlines():
+            upper = line.upper()
+            if "CAN TX" in upper or "CAN RX" in upper or " TX  " in line or " RX  " in line:
+                self.append_to_view(self.can_view, line + "\n", raw=True)
+            if "VERDICT" in upper or "PASS_" in upper or "FAIL_" in upper or "NRC_" in upper:
+                self.append_to_view(self.verdict_view, line + "\n", raw=True)
+            if "TESTCASE" in upper or "=====" in line or "DRY-RUN" in upper or "SAFETY" in upper or "REFUSING" in upper:
+                self.append_evidence_note(line)
 
     def extract_log_dir(self, text: str) -> None:
         for match in re.finditer(r"logs:\s*(.+)", text):
@@ -581,13 +677,25 @@ class UdsObserverGui(QMainWindow):
         else:
             QMessageBox.information(self, "No log folder", "No completed log folder is available yet.")
 
+    def clear_evidence_views(self) -> None:
+        self.live_log_view.clear()
+        self.can_view.clear()
+        self.verdict_view.clear()
+        self.evidence_view.clear()
+
     def append_log(self, text: str, raw: bool = False) -> None:
+        self.append_to_view(self.live_log_view, text, raw=raw)
+
+    def append_evidence_note(self, text: str) -> None:
+        self.append_to_view(self.evidence_view, text + "\n", raw=True)
+
+    def append_to_view(self, view: QTextEdit, text: str, raw: bool = False) -> None:
         if raw:
-            self.log_view.moveCursor(QTextCursor.MoveOperation.End)
-            self.log_view.insertPlainText(text)
+            view.moveCursor(QTextCursor.MoveOperation.End)
+            view.insertPlainText(text)
         else:
-            self.log_view.append(text)
-        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
+            view.append(text)
+        view.moveCursor(QTextCursor.MoveOperation.End)
 
 
 def main() -> int:

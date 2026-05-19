@@ -16,13 +16,17 @@ class ConsoleLog:
         self.verbose = verbose
         self.show_process = show_process
         self.show_can = show_can
+        self.test_id_label = ""
+
+    def set_test_context(self, test_id_label: str = "") -> None:
+        self.test_id_label = test_id_label
 
     def info(self, msg: str) -> None:
         print(msg, flush=True)
 
     def process(self, msg: str) -> None:
         if self.show_process or self.verbose:
-            print(msg, flush=True)
+            print(self._prefix(msg), flush=True)
 
     def debug(self, msg: str) -> None:
         if self.verbose:
@@ -30,11 +34,16 @@ class ConsoleLog:
 
     def tx_can(self, can_id: int, data: bytes) -> None:
         if self.show_can:
-            print(f"  CAN TX {can_id:X}#{data.hex().upper()}", flush=True)
+            print(self._prefix(f"  CAN TX {can_id:X}#{data.hex().upper()}"), flush=True)
 
     def rx_can(self, can_id: int, data: bytes) -> None:
         if self.verbose:
-            print(f"  CAN RX {can_id:X}#{data.hex().upper()}", flush=True)
+            print(self._prefix(f"  CAN RX {can_id:X}#{data.hex().upper()}"), flush=True)
+
+    def _prefix(self, msg: str) -> str:
+        if not self.test_id_label:
+            return msg
+        return f"[{self.test_id_label}] {msg}"
 
 
 class RunLogger:
@@ -47,13 +56,23 @@ class RunLogger:
     def __init__(self, base_dir: str | Path = "runs", run_name: str | None = None) -> None:
         ts = time.strftime("%Y%m%d_%H%M%S")
         safe = (run_name or "uds_run").replace("/", "_").replace(" ", "_")
+        self.run_id = f"{ts}_{safe}"
         self.dir = ensure_dir(Path(base_dir) / f"{ts}_{safe}")
         self.jsonl_path = self.dir / "events.jsonl"
         self.csv_path = self.dir / "summary.csv"
         self._csv_rows: List[Dict[str, Any]] = []
+        self._context: Dict[str, Any] = {}
+
+    def set_testcase_context(self, **metadata: Any) -> None:
+        self._context = dict(metadata)
+
+    def clear_testcase_context(self) -> None:
+        self._context = {}
 
     def event(self, event_type: str, **data: Any) -> None:
-        row: Dict[str, Any] = {"ts": time.time(), "event": event_type}
+        row: Dict[str, Any] = {"ts": time.time(), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "run_id": self.run_id, "event": event_type}
+        for key, value in self._context.items():
+            row.setdefault(key, value)
         row.update(_jsonable(data))
         with self.jsonl_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
@@ -71,8 +90,11 @@ class RunLogger:
         note: str = "",
         verdict: str = "",
         response_display: str | None = None,
+        evidence_note: str | None = None,
     ) -> None:
         response_value = response_display if response_display is not None else response.hex().upper()
+        metadata = dict(self._context)
+        evidence_note_value = evidence_note if evidence_note is not None else note
         self.event(
             "uds_result",
             testcase=testcase,
@@ -84,23 +106,58 @@ class RunLogger:
             nrc=f"0x{nrc:02X}" if nrc is not None else "",
             note=note,
             verdict=verdict,
+            evidence_note=evidence_note_value,
         )
         self._csv_rows.append({
-            "testcase": testcase,
+            "run_id": self.run_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "test_id": metadata.get("test_id", ""),
+            "test_ids": ", ".join(metadata.get("test_ids", [])) if isinstance(metadata.get("test_ids"), list) else metadata.get("test_ids", ""),
+            "display_name": metadata.get("display_name", ""),
+            "internal_name": metadata.get("internal_name", testcase),
+            "group": metadata.get("group", ""),
+            "category": metadata.get("category", ""),
+            "mode": metadata.get("mode", ""),
             "target": target,
+            "tx_id": metadata.get("tx_id", ""),
+            "rx_id": metadata.get("rx_id", ""),
+            "session_flow": metadata.get("session_flow", ""),
             "step": step,
             "request": spaced(request),
             "response": response_display if response_display is not None else spaced(response),
             "status": status,
             "nrc": f"0x{nrc:02X}" if nrc is not None else "",
-            "note": note,
             "verdict": verdict,
+            "evidence_note": evidence_note_value,
+            "source_yaml": metadata.get("source_yaml", ""),
         })
 
     def close(self) -> None:
         if not self._csv_rows:
             return
-        fields = ["testcase", "target", "step", "request", "response", "status", "nrc", "note", "verdict"]
+        fields = [
+            "run_id",
+            "timestamp",
+            "test_id",
+            "test_ids",
+            "display_name",
+            "internal_name",
+            "group",
+            "category",
+            "mode",
+            "target",
+            "tx_id",
+            "rx_id",
+            "session_flow",
+            "step",
+            "request",
+            "response",
+            "status",
+            "nrc",
+            "verdict",
+            "evidence_note",
+            "source_yaml",
+        ]
         with self.csv_path.open("w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fields)
             writer.writeheader()
