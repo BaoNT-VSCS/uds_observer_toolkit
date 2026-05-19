@@ -70,7 +70,13 @@ class RunLogger:
         self._context = {}
 
     def event(self, event_type: str, **data: Any) -> None:
-        row: Dict[str, Any] = {"ts": time.time(), "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "run_id": self.run_id, "event": event_type}
+        row: Dict[str, Any] = {
+            "ts": time.time(),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "run_id": self.run_id,
+            "event": event_type,
+            "event_type": event_type,
+        }
         for key, value in self._context.items():
             row.setdefault(key, value)
         row.update(_jsonable(data))
@@ -113,8 +119,10 @@ class RunLogger:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "test_id": metadata.get("test_id", ""),
             "test_ids": ", ".join(metadata.get("test_ids", [])) if isinstance(metadata.get("test_ids"), list) else metadata.get("test_ids", ""),
+            "title": metadata.get("title", ""),
             "display_name": metadata.get("display_name", ""),
             "internal_name": metadata.get("internal_name", testcase),
+            "testcase_type": metadata.get("testcase_type", metadata.get("type", "")),
             "group": metadata.get("group", ""),
             "category": metadata.get("category", ""),
             "mode": metadata.get("mode", ""),
@@ -122,6 +130,7 @@ class RunLogger:
             "tx_id": metadata.get("tx_id", ""),
             "rx_id": metadata.get("rx_id", ""),
             "session_flow": metadata.get("session_flow", ""),
+            "effective_parameters_json": json.dumps(metadata.get("effective_parameters", {}), ensure_ascii=False, sort_keys=True),
             "step": step,
             "request": spaced(request),
             "response": response_display if response_display is not None else spaced(response),
@@ -140,8 +149,10 @@ class RunLogger:
             "timestamp",
             "test_id",
             "test_ids",
+            "title",
             "display_name",
             "internal_name",
+            "testcase_type",
             "group",
             "category",
             "mode",
@@ -149,6 +160,7 @@ class RunLogger:
             "tx_id",
             "rx_id",
             "session_flow",
+            "effective_parameters_json",
             "step",
             "request",
             "response",

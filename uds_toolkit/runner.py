@@ -48,7 +48,21 @@ class Runner:
                 tc = normalize_testcase_metadata(tc)
                 target_name = str(tc.get("target", self.config.get("default_target", "default")))
                 label = test_id_label(tc)
-                self.console.info(f"DRY-RUN {label} testcase={tc['name']} type={tc['type']} target={target_name}")
+                target = self.targets.get(target_name)
+                session_flow = tc.get("session_flow", target.session_flow if target else [])
+                session_text = spaced(bytes(parse_byte(x) for x in session_flow)) if isinstance(session_flow, list) else str(session_flow or "")
+                self.console.info(
+                    "\n"
+                    f"===== {label} — {tc.get('title', tc.get('name'))} =====\n"
+                    f"Internal name: {tc.get('internal_name', tc.get('name', ''))}\n"
+                    f"Type: {tc.get('type', '')}\n"
+                    f"Target: {target_name}\n"
+                    f"TX/RX: {can_id_hx(target.txid) if target else ''} -> {can_id_hx(target.rxid) if target else ''}\n"
+                    f"Session flow: {session_text}\n"
+                    f"Effective parameters: {tc.get('_effective_parameters', {})}\n"
+                    f"Safety: {tc.get('safety_level', '')}\n"
+                    "Dry run: True"
+                )
                 if str(tc.get("type")) == "uds_access_control_probe":
                     for line in self._dry_run_access_control_probe(tc):
                         self.console.info(f"  [{label}] {line}")
@@ -105,10 +119,13 @@ class Runner:
             "\n"
             f"===== {tc.get('display_name', tc.get('name'))} =====\n"
             f"Internal name: {tc['name']}\n"
+            f"Type: {tc.get('type', '')}\n"
             f"Target: {target.name}\n"
             f"TX/RX: {can_id_hx(target.txid)} -> {can_id_hx(target.rxid)}\n"
             f"Session flow: {session_text}\n"
-            f"Mode: {tc.get('mode', tc.get('type'))}"
+            f"Effective parameters: {tc.get('_effective_parameters', {})}\n"
+            f"Safety: {tc.get('safety_level', '')}\n"
+            f"Dry run: {self.dry_run}"
         )
         ext = self.can_cfg.extended_id if target.extended_id is None else target.extended_id
         transport = IsoTp(

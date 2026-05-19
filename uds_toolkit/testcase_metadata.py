@@ -238,14 +238,21 @@ def metadata_for_event(tc: Mapping[str, Any]) -> dict[str, Any]:
     keys = [
         "test_id",
         "test_ids",
+        "title",
         "display_name",
         "internal_name",
+        "type",
         "group",
         "category",
         "mode",
+        "safety_level",
         "source_yaml",
     ]
-    return {key: normalized.get(key, "" if key != "test_ids" else []) for key in keys}
+    out = {key: normalized.get(key, "" if key != "test_ids" else []) for key in keys}
+    out["testcase_type"] = normalized.get("type", "")
+    if normalized.get("_effective_parameters") is not None:
+        out["effective_parameters"] = normalized.get("_effective_parameters")
+    return out
 
 
 def _compact_ids(ids: list[str]) -> str:
