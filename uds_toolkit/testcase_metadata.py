@@ -234,7 +234,12 @@ def test_id_label(tc: Mapping[str, Any]) -> str:
 
 
 def metadata_for_event(tc: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = normalize_testcase_metadata(tc)
+    # Runtime-only keys such as _bus and _can_module can contain socket/module
+    # objects. Metadata normalization deep-copies the testcase, so strip those
+    # keys before building event context.
+    metadata_source = {key: value for key, value in dict(tc).items() if not str(key).startswith("_")}
+    effective_parameters = tc.get("_effective_parameters")
+    normalized = normalize_testcase_metadata(metadata_source)
     keys = [
         "test_id",
         "test_ids",
@@ -250,8 +255,8 @@ def metadata_for_event(tc: Mapping[str, Any]) -> dict[str, Any]:
     ]
     out = {key: normalized.get(key, "" if key != "test_ids" else []) for key in keys}
     out["testcase_type"] = normalized.get("type", "")
-    if normalized.get("_effective_parameters") is not None:
-        out["effective_parameters"] = normalized.get("_effective_parameters")
+    if effective_parameters is not None:
+        out["effective_parameters"] = effective_parameters
     return out
 
 
