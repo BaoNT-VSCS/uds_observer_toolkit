@@ -1,0 +1,62 @@
+# SecurityAccess behavior probes converted from the original uds27_* scripts.
+# Select a single case with: --case sa_request_seed_only
+
+testcases:
+  - name: sa_request_seed_only
+    type: security_access
+    target: ecu1
+    mode: request_seed_only
+    seed_subfn: 0x01
+
+  - name: sa_key_without_seed
+    type: security_access
+    target: ecu1
+    mode: key_without_seed
+    seed_subfn: 0x01
+    key_subfn: 0x02
+    key_policy: format-random
+
+  - name: sa_seed_timeout_key
+    type: security_access
+    target: ecu1
+    mode: seed_timeout_key
+    seed_subfn: 0x01
+    key_subfn: 0x02
+    key_policy: invalid-bitflip
+    s3_wait: 6.0
+
+  - name: sa_one_seed_many_keys
+    type: security_access
+    target: ecu1
+    mode: one_seed_many_keys
+    seed_subfn: 0x01
+    key_subfn: 0x02
+    key_policy: invalid-bitflip
+    attempts: 5
+    stop_on_positive_unlock: true
+
+  - name: sa_seed_key_exchange_loop
+    type: security_access
+    target: ecu1
+    mode: seed_key_exchange_loop
+    seed_subfn: 0x01
+    key_subfn: 0x02
+    key_policy: invalid-bitflip
+    attempts: 5
+
+  - name: sa_penalty_then_seed
+    type: security_access
+    target: ecu1
+    mode: penalty_then_seed
+    seed_subfn: 0x01
+    key_subfn: 0x02
+    key_policy: invalid-bitflip
+    attempts: 5
+    penalty_probe_delay: 0.05
+
+  - name: sa_multi_seed_response
+    type: security_access
+    target: ecu1
+    mode: multi_seed_response
+    seed_subfn: 0x01
+    capture_window: 1.0
