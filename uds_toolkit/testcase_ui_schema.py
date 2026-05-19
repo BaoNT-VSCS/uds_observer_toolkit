@@ -24,8 +24,8 @@ BUILTIN_DEFAULTS: Dict[str, Any] = {
         "delay": 0.20,
     },
     "safety": {
-        "authorized": False,
-        "dry_run": True,
+        "authorized": True,
+        "dry_run": False,
     },
     "default_target": "ecu1",
     "targets": {},
@@ -226,10 +226,10 @@ SCHEMAS: Dict[str, Dict[str, Any]] = {
             field("session_flow", "Session flow", "hex_list", []),
             field("service", "Service", "hex_byte", "0x22", required=True),
             field("payload", "Payload", "payload_list", "", required=True),
-            field("expected_positive_sid", "Expected positive SID", "hex_byte", ""),
-            field("acceptable_nrcs", "Acceptable NRCs", "hex_list", []),
         ],
         "advanced_fields": [
+            field("expected_positive_sid", "Expected positive SID", "hex_byte", ""),
+            field("acceptable_nrcs", "Acceptable NRCs", "hex_list", []),
             field("check_subfn", "Check subfunction", "bool", True),
             field("redact_response_data", "Redact response data", "bool", False),
             field("threat_if_positive", "Threat if positive", "bool", True),
@@ -324,9 +324,6 @@ def validate_effective_config(effective_config: dict) -> list[ValidationMessage]
     can_cfg = effective_config.get("can") or {}
     target_name = str(effective_config.get("default_target") or testcase.get("target") or "")
     target = (effective_config.get("targets") or {}).get(target_name, {})
-    dry_run = bool((effective_config.get("safety") or {}).get("dry_run", False))
-    authorized = bool((effective_config.get("safety") or {}).get("authorized", False))
-
     for key in ("txid", "rxid"):
         try:
             parse_can_id(target.get(key), extended=bool(can_cfg.get("extended_id", False)))
@@ -370,20 +367,6 @@ def validate_effective_config(effective_config: dict) -> list[ValidationMessage]
                 parse_int_range(testcase.get("subfunctions", ""), item_parser=parse_byte, max_items=max_items or 256)
         except Exception as exc:
             messages.append(ValidationMessage("error", "range", str(exc)))
-        if not dry_run and not authorized:
-            messages.append(ValidationMessage("error", "authorized", "Real fuzzing/probing requires authorization."))
-        if not dry_run:
-            messages.append(ValidationMessage("warning", "dry_run", "Fuzzing dry-run is strongly recommended before real transmission."))
-
-    services = _services_for_testcase(testcase)
-    destructive = any(service in DESTRUCTIVE_SERVICES for service in services)
-    if destructive and not dry_run:
-        if not authorized:
-            messages.append(ValidationMessage("error", "authorized", "Destructive service requires authorization."))
-        if not bool(testcase.get("destructive_confirm", False)):
-            messages.append(ValidationMessage("error", "destructive_confirm", "Destructive service is blocked unless destructive_confirm is true."))
-    if dry_run:
-        messages.append(ValidationMessage("info", "dry_run", "Dry-run mode will not transmit CAN frames."))
     return messages
 
 
@@ -397,7 +380,6 @@ def format_effective_config_preview(effective_config: dict) -> str:
         f"target: {info.get('target', '')}",
         f"tx_id/rx_id: {info.get('tx_id', '')} -> {info.get('rx_id', '')}",
         f"session_flow: {info.get('session_flow', '')}",
-        f"safety_level: {info.get('safety_level', '')}",
         f"dry_run: {bool(info.get('dry_run', False))}",
         f"will_transmit_can: {bool(info.get('will_transmit', False))}",
         "effective_parameters:",

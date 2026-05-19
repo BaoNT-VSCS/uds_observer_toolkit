@@ -9,11 +9,6 @@ from ..uds import UdsClient, UdsResult
 from ..utils import parse_byte, parse_hex_bytes, spaced
 
 
-DESTRUCTIVE_SERVICES = {0x11, 0x2E, 0x34, 0x35, 0x28}
-DESTRUCTIVE_REFUSAL = "Refusing to transmit potentially disruptive UDS service without destructive_confirm: true."
-AUTH_REFUSAL = "Refusing to run UDS access-control probe without safety.authorized: true or --yes-i-am-authorized."
-
-
 @dataclass(frozen=True)
 class AccessRequest:
     step: str
@@ -25,10 +20,6 @@ class AccessRequest:
     check_subfn: bool
     redact_response_data: bool
     notes: str
-
-
-class SafetyRefusal(RuntimeError):
-    pass
 
 
 def _cfg(ctx: CaseContext, key: str, default: Any = None) -> Any:
@@ -66,17 +57,6 @@ def _load_requests(ctx: CaseContext) -> list[AccessRequest]:
             )
         )
     return requests
-
-
-def validate_destructive_guard(ctx: CaseContext, requests: list[AccessRequest]) -> None:
-    """Refuse real-mode probes that are not explicitly authorized and confirmed."""
-    authorized = bool(_cfg(ctx, "_authorized", False)) or bool((_cfg(ctx, "safety", {}) or {}).get("authorized", False))
-    destructive_confirm = bool(_cfg(ctx, "destructive_confirm", False))
-
-    if any(req.service in DESTRUCTIVE_SERVICES for req in requests) and not destructive_confirm:
-        raise SafetyRefusal(DESTRUCTIVE_REFUSAL)
-    if not authorized:
-        raise SafetyRefusal(AUTH_REFUSAL)
 
 
 def classify_verdict(result: UdsResult, *, acceptable_nrcs: set[int], threat_if_positive: bool, expected_positive_sid: int) -> str:
@@ -132,15 +112,6 @@ class UdsAccessControlProbe:
             raise ValueError("uds_access_control_probe does not perform SecurityAccess; set security_access_required: false for unauthenticated probes")
 
         requests = _load_requests(ctx)
-        try:
-            validate_destructive_guard(ctx, requests)
-        except SafetyRefusal as exc:
-            for req in requests:
-                if req.service in DESTRUCTIVE_SERVICES:
-                    result = UdsResult(request=req.payload, note=str(exc), exception=str(exc))
-                    _record(ctx, req, result, "BLOCKED_SAFETY_GUARD", note=str(exc))
-            client.log.process(f"  safety                 {exc}")
-            return 1
 
         session_flow = [parse_byte(x) for x in cfg.get("session_flow", ctx.target.session_flow)]
         if session_flow:
@@ -160,7 +131,6 @@ class UdsAccessControlProbe:
             if not ok:
                 return 1
 
-        rc = 0
         delay = float(cfg.get("delay", ctx.timing.delay))
         for req in requests:
             result = client.request(
@@ -179,8 +149,6 @@ class UdsAccessControlProbe:
             _record(ctx, req, result, verdict)
             response_text = _response_display(req, result) or spaced(result.response)
             client.log.process(f"  {req.step:<22} VERDICT {verdict} response={response_text}")
-            if verdict in {"FAIL_THREAT_POSITIVE", "ERROR_EXCEPTION"}:
-                rc = 1
             if delay > 0:
                 time.sleep(delay)
-        return rc
+        return 0

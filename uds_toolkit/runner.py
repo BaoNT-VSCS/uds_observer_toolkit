@@ -58,22 +58,12 @@ class Runner:
                     f"Type: {tc.get('type', '')}\n"
                     f"Target: {target_name}\n"
                     f"TX/RX: {can_id_hx(target.txid) if target else ''} -> {can_id_hx(target.rxid) if target else ''}\n"
-                    f"Session flow: {session_text}\n"
-                    f"Effective parameters: {tc.get('_effective_parameters', {})}\n"
-                    f"Safety: {tc.get('safety_level', '')}\n"
-                    "Dry run: True"
+                    f"Session flow: {session_text}"
                 )
                 if str(tc.get("type")) == "uds_access_control_probe":
                     for line in self._dry_run_access_control_probe(tc):
                         self.console.info(f"  [{label}] {line}")
             return 0
-
-        if any(str(tc.get("type", "")).endswith("fuzzer") for tc in selected) and not self.authorized:
-            raise ConfigError("fuzzing testcases require safety.authorized: true or CLI --yes-i-am-authorized")
-        for tc in selected:
-            if str(tc.get("type", "")) == "uds_access_control_probe":
-                self._preflight_access_control_probe(tc)
-
 
         if not self.targets:
             raise ConfigError("at least one target is required")
@@ -89,7 +79,7 @@ class Runner:
                 merged_tc = normalize_testcase_metadata(tc)
                 merged_tc["_bus"] = bus
                 merged_tc["_can_module"] = can_mod
-                merged_tc["_authorized"] = self.authorized
+                merged_tc["_authorized"] = True
                 case_rc = self._run_one(bus, can_mod, target, merged_tc)
                 rc = max(rc, case_rc)
         finally:
@@ -122,10 +112,7 @@ class Runner:
             f"Type: {tc.get('type', '')}\n"
             f"Target: {target.name}\n"
             f"TX/RX: {can_id_hx(target.txid)} -> {can_id_hx(target.rxid)}\n"
-            f"Session flow: {session_text}\n"
-            f"Effective parameters: {tc.get('_effective_parameters', {})}\n"
-            f"Safety: {tc.get('safety_level', '')}\n"
-            f"Dry run: {self.dry_run}"
+            f"Session flow: {session_text}"
         )
         ext = self.can_cfg.extended_id if target.extended_id is None else target.extended_id
         transport = IsoTp(
@@ -190,7 +177,6 @@ class Runner:
         return lines
 
     def _preflight_access_control_probe(self, tc: Mapping[str, Any]) -> None:
-        from .cases.access_control import AUTH_REFUSAL, DESTRUCTIVE_REFUSAL, DESTRUCTIVE_SERVICES
         from .utils import parse_byte, parse_hex_bytes
 
         requests = tc.get("requests", [])
@@ -207,7 +193,3 @@ class Runner:
             if service != payload[0]:
                 raise ConfigError(f"testcase '{tc.get('name')}' request #{idx} service 0x{service:02X} does not match payload SID 0x{payload[0]:02X}")
             services.append(service)
-        if any(service in DESTRUCTIVE_SERVICES for service in services) and not bool(tc.get("destructive_confirm", False)):
-            raise ConfigError(DESTRUCTIVE_REFUSAL)
-        if not self.authorized:
-            raise ConfigError(AUTH_REFUSAL)

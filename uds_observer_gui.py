@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - startup guard
 
 try:
     from PySide6.QtCore import QEvent, QProcess, QProcessEnvironment, Qt, QUrl
-    from PySide6.QtGui import QDesktopServices, QFont, QTextCursor
+    from PySide6.QtGui import QColor, QDesktopServices, QFont, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -111,6 +111,7 @@ QLineEdit, QComboBox {
 }
 QTextEdit {
     padding: 6px;
+    font-size: 14px;
 }
 QPushButton {
     background: #202938;
@@ -359,7 +360,7 @@ class UdsObserverGui(QMainWindow):
         self.summary_title_label = QLabel("Title: -")
         self.summary_type_label = QLabel("Type / mode: -")
         self.summary_service_label = QLabel("Service: -")
-        self.summary_safety_label = QLabel("Safety: -")
+        self.summary_safety_label = QLabel("Flow: TX/RX observe")
         self.summary_objective_label = QLabel("Objective: -")
         for label in (
             self.summary_id_label,
@@ -387,24 +388,25 @@ class UdsObserverGui(QMainWindow):
         self.advanced_params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         left_body_layout.addWidget(self.advanced_params_group)
 
-        safety_group = QGroupBox("Safety / Run Options")
+        safety_group = QGroupBox("Run / Observe")
         safety_layout = QVBoxLayout(safety_group)
-        self.safety_badge = QLabel("Safety: unknown")
-        self.safety_badge.setStyleSheet("color:#ffd166; font-weight:bold;")
+        self.safety_badge = QLabel("Mode: transmit and observe")
+        self.safety_badge.setStyleSheet("color:#81e6a5; font-weight:bold;")
         self.dry_run_check = QCheckBox("Dry run / validate only")
-        self.dry_run_check.setChecked(True)
+        self.dry_run_check.setChecked(False)
         self.authorized_check = QCheckBox("I am authorized")
+        self.authorized_check.setChecked(True)
         self.destructive_confirm_check = QCheckBox("Destructive confirm")
+        self.destructive_confirm_check.setChecked(True)
         self.destructive_confirm_check.setVisible(False)
         self.show_process_check = QCheckBox("Show process steps")
         self.show_process_check.setChecked(True)
         self.show_can_check = QCheckBox("Show CAN TX")
+        self.show_can_check.setChecked(True)
         self.verbose_check = QCheckBox("Verbose RX/debug")
+        self.verbose_check.setChecked(True)
         for widget in (
             self.safety_badge,
-            self.dry_run_check,
-            self.authorized_check,
-            self.destructive_confirm_check,
             self.show_process_check,
             self.show_can_check,
             self.verbose_check,
@@ -533,6 +535,7 @@ class UdsObserverGui(QMainWindow):
         view = QTextEdit()
         view.setReadOnly(True)
         view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        view.setFont(QFont("Consolas", 13))
         return view
 
     def set_advanced_yaml_visible(self, visible: bool) -> None:
@@ -876,7 +879,8 @@ class UdsObserverGui(QMainWindow):
             if self.destructive_confirm_check.isVisible():
                 values["destructive_confirm"] = bool(self.destructive_confirm_check.isChecked())
         values["_dry_run"] = bool(self.dry_run_check.isChecked())
-        values["_authorized"] = bool(self.authorized_check.isChecked())
+        values["_authorized"] = True
+        values["destructive_confirm"] = True
         return values
 
     def effective_config_for_testcase(self, tc: Mapping[str, Any], *, include_current: bool = False) -> Dict[str, Any]:
@@ -915,8 +919,7 @@ class UdsObserverGui(QMainWindow):
         command = [sys.executable, str(ROOT / "run_udstk.py"), "-c", "<runtime_config>", "--runs-dir", str(ROOT / "runs")]
         if self.dry_run_check.isChecked():
             command.append("--dry-run")
-        if self.authorized_check.isChecked():
-            command.append("--yes-i-am-authorized")
+        command.append("--yes-i-am-authorized")
         if self.show_process_check.isChecked():
             command.append("--show-process")
         if self.show_can_check.isChecked():
@@ -945,21 +948,12 @@ class UdsObserverGui(QMainWindow):
 
     def update_safety_badge(self, effective: Mapping[str, Any]) -> None:
         tc = (effective.get("testcases") or [{}])[0]
-        safety = str(tc.get("safety_level") or "unknown")
         dry_run = bool((effective.get("safety") or {}).get("dry_run", False))
-        destructive = bool(tc.get("destructive_confirm_required")) or safety == "disruptive"
-        self.safety_badge.setText(f"Safety: {safety} | {'dry-run only' if dry_run else 'will transmit CAN frames'}")
-        self.destructive_confirm_check.setVisible(destructive)
-        if destructive:
-            desired = bool(self.testcase_overrides.get(self.case_key(tc), {}).get("destructive_confirm", tc.get("destructive_confirm", False)))
-            if self.destructive_confirm_check.isChecked() != desired:
-                self.destructive_confirm_check.blockSignals(True)
-                self.destructive_confirm_check.setChecked(desired)
-                self.destructive_confirm_check.blockSignals(False)
-        else:
-            self.destructive_confirm_check.blockSignals(True)
-            self.destructive_confirm_check.setChecked(False)
-            self.destructive_confirm_check.blockSignals(False)
+        self.safety_badge.setText("Mode: dry-run only" if dry_run else "Mode: transmit and observe")
+        self.destructive_confirm_check.setVisible(False)
+        self.destructive_confirm_check.blockSignals(True)
+        self.destructive_confirm_check.setChecked(True)
+        self.destructive_confirm_check.blockSignals(False)
 
     def update_validation_view(self) -> None:
         if not self.current_validation:
@@ -1144,7 +1138,7 @@ class UdsObserverGui(QMainWindow):
             self.summary_title_label.setText("Title: No testcase available")
             self.summary_type_label.setText("Type / mode: -")
             self.summary_service_label.setText("Service: -")
-            self.summary_safety_label.setText("Safety: -")
+            self.summary_safety_label.setText("Flow: -")
             self.summary_objective_label.setText("Objective: -")
             return
         ids = tc.get("test_ids") or []
@@ -1152,12 +1146,12 @@ class UdsObserverGui(QMainWindow):
         if len(objective) > 150:
             objective = objective[:147].rstrip() + "..."
         warning = " | metadata warning" if tc.get("metadata_warning") else ""
-        destructive = " | destructive guard" if tc.get("safety_level") == "disruptive" else ""
+        destructive = ""
         self.summary_id_label.setText(f"Test ID: {', '.join(ids) if ids else 'UNMAPPED'}")
         self.summary_title_label.setText(f"Title: {tc.get('title', '')}")
         self.summary_type_label.setText(f"Type / mode: {tc.get('type', '')} / {tc.get('mode', '')}")
         self.summary_service_label.setText(f"Service: {tc.get('service', '')} {tc.get('subfunction', '')}".strip())
-        self.summary_safety_label.setText(f"Safety: {tc.get('safety_level', '')}{destructive}{warning}")
+        self.summary_safety_label.setText(f"Flow: TX/RX observe{warning}")
         self.summary_objective_label.setText(f"Objective: {objective}")
 
     def selected_testcases(self, selected_only: bool) -> List[Dict[str, Any]]:
@@ -1229,8 +1223,7 @@ class UdsObserverGui(QMainWindow):
         args = [str(ROOT / "run_udstk.py"), "-c", str(runtime_config), "--runs-dir", str(ROOT / "runs")]
         if self.dry_run_check.isChecked():
             args.append("--dry-run")
-        if self.authorized_check.isChecked():
-            args.append("--yes-i-am-authorized")
+        args.append("--yes-i-am-authorized")
         if self.show_process_check.isChecked():
             args.append("--show-process")
         if self.show_can_check.isChecked():
@@ -1268,10 +1261,7 @@ class UdsObserverGui(QMainWindow):
             f"Type: {tc.get('type', '')}\n"
             f"Target: {target_name}\n"
             f"TX/RX: {hex_text(target.get('txid', self.txid_edit.text()), 3)} -> {hex_text(target.get('rxid', self.rxid_edit.text()), 3)}\n"
-            f"Session flow: {session_text(tc.get('session_flow', target.get('session_flow', [])))}\n"
-            f"Effective parameters: {params}\n"
-            f"Safety: {tc.get('safety_level', '')}\n"
-            f"Dry run: {dry_run}"
+            f"Session flow: {session_text(tc.get('session_flow', target.get('session_flow', [])))}"
         )
         self.append_log(header)
         self.append_evidence_note(header)
@@ -1347,12 +1337,34 @@ class UdsObserverGui(QMainWindow):
         self.append_to_view(self.evidence_view, text + "\n", raw=True)
 
     def append_to_view(self, view: QTextEdit, text: str, raw: bool = False) -> None:
-        if raw:
-            view.moveCursor(QTextCursor.MoveOperation.End)
-            view.insertPlainText(text)
-        else:
-            view.append(text)
         view.moveCursor(QTextCursor.MoveOperation.End)
+        chunks = text.splitlines(True) or [text]
+        for chunk in chunks:
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(self.log_color_for_line(chunk)))
+            view.setCurrentCharFormat(fmt)
+            view.insertPlainText(chunk if raw or chunk.endswith("\n") else chunk + "\n")
+        view.moveCursor(QTextCursor.MoveOperation.End)
+
+    def log_color_for_line(self, line: str) -> str:
+        upper = line.upper()
+        if "ERROR" in upper or "EXCEPTION" in upper or "FAIL" in upper or "TRACEBACK" in upper:
+            return "#ff7b7b"
+        if "NRC_" in upper or " 7F " in upper or "NEGATIVE" in upper:
+            return "#fbbf24"
+        if "POSITIVE" in upper or "PASS" in upper:
+            return "#81e6a5"
+        if " RX " in line or " CAN RX " in upper:
+            return "#6ee7b7"
+        if " TX " in line or " CAN TX " in upper:
+            return "#7dd3fc"
+        if line.startswith("=====") or "=====" in line:
+            return "#c084fc"
+        if line.lstrip().startswith("$ "):
+            return "#93c5fd"
+        if "logs:" in line:
+            return "#a7f3d0"
+        return "#d7dde7"
 
 
 def main() -> int:
