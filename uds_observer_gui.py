@@ -74,6 +74,15 @@ DEFAULT_CONFIG_FILES = [
 CATEGORIES = ["All", "Reconnaissance", "SecurityAccess", "Seed Sampling", "Access Control", "Fuzzing"]
 GROUPS = ["All", "Group A", "Group B", "Group C", "Group D", "Section 10", "Recon"]
 
+
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event: Any) -> None:
+        if self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
 STYLE = """
 QWidget {
     background: #12161c;
@@ -310,7 +319,7 @@ class UdsObserverGui(QMainWindow):
         target_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.channel_edit = QLineEdit("can0")
         self.interface_edit = QLineEdit("socketcan")
-        self.target_combo = QComboBox()
+        self.target_combo = NoWheelComboBox()
         self.txid_edit = QLineEdit("0x681")
         self.rxid_edit = QLineEdit("0x601")
         self.padding_edit = QLineEdit("0x00")
@@ -345,16 +354,16 @@ class UdsObserverGui(QMainWindow):
 
         selector_group = QGroupBox("Testcase")
         selector_layout = QVBoxLayout(selector_group)
-        self.category_filter = QComboBox()
+        self.category_filter = NoWheelComboBox()
         self.category_filter.addItems(CATEGORIES)
-        self.group_filter = QComboBox()
+        self.group_filter = NoWheelComboBox()
         self.group_filter.addItems(GROUPS)
         for label, widget in (("Category", self.category_filter), ("Group", self.group_filter)):
             row = QHBoxLayout()
             row.addWidget(QLabel(label), 0)
             row.addWidget(widget, 1)
             selector_layout.addLayout(row)
-        self.testcase_combo = QComboBox()
+        self.testcase_combo = NoWheelComboBox()
         selector_layout.addWidget(self.testcase_combo)
         self.summary_id_label = QLabel("Test ID: -")
         self.summary_title_label = QLabel("Title: -")
@@ -483,7 +492,10 @@ class UdsObserverGui(QMainWindow):
 
         log_buttons = QHBoxLayout()
         self.clear_log_btn = QPushButton("Clear evidence views")
+        self.wrap_log_check = QCheckBox("Wrap log")
+        self.wrap_log_check.setChecked(True)
         log_buttons.addWidget(self.clear_log_btn)
+        log_buttons.addWidget(self.wrap_log_check)
         log_buttons.addStretch(1)
         right_layout.addLayout(log_buttons)
 
@@ -520,6 +532,7 @@ class UdsObserverGui(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_process)
         self.open_logs_btn.clicked.connect(self.open_last_log_dir)
         self.clear_log_btn.clicked.connect(self.clear_evidence_views)
+        self.wrap_log_check.toggled.connect(self.set_log_wrap)
         self.reset_overrides_btn.clicked.connect(self.reset_testcase_overrides)
         self.dry_run_check.toggled.connect(self.update_effective_preview)
         self.authorized_check.toggled.connect(self.update_effective_preview)
@@ -534,9 +547,14 @@ class UdsObserverGui(QMainWindow):
     def _make_log_view(self) -> QTextEdit:
         view = QTextEdit()
         view.setReadOnly(True)
-        view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         view.setFont(QFont("Consolas", 13))
         return view
+
+    def set_log_wrap(self, enabled: bool) -> None:
+        mode = QTextEdit.LineWrapMode.WidgetWidth if enabled else QTextEdit.LineWrapMode.NoWrap
+        for view in (self.live_log_view, self.can_view, self.verdict_view, self.evidence_view, self.command_preview_view):
+            view.setLineWrapMode(mode)
 
     def set_advanced_yaml_visible(self, visible: bool) -> None:
         for child in self.advanced_yaml_group.findChildren(QWidget):
@@ -697,7 +715,7 @@ class UdsObserverGui(QMainWindow):
             widget.setChecked(bool(value))
             return widget
         if field_type == "dropdown":
-            widget = QComboBox()
+            widget = NoWheelComboBox()
             options = [str(x) for x in field.get("options", [])]
             widget.addItems(options)
             text = str(value if value is not None else field.get("default", ""))
@@ -1292,11 +1310,20 @@ class UdsObserverGui(QMainWindow):
         for line in text.splitlines():
             upper = line.upper()
             if "CAN TX" in upper or "CAN RX" in upper or " TX  " in line or " RX  " in line:
-                self.append_to_view(self.can_view, line + "\n", raw=True)
+                self.append_to_view(self.can_view, self.format_flow_line(line) + "\n", raw=True)
             if "VERDICT" in upper or "PASS_" in upper or "FAIL_" in upper or "NRC_" in upper:
                 self.append_to_view(self.verdict_view, line + "\n", raw=True)
-            if "TESTCASE" in upper or "=====" in line or "DRY-RUN" in upper or "SAFETY" in upper or "REFUSING" in upper:
+            if "=====" in line or line.startswith("logs:") or "[process finished]" in line:
                 self.append_evidence_note(line)
+
+    def format_flow_line(self, line: str) -> str:
+        line = re.sub(r"\s+", " ", line.strip())
+        line = line.replace(" CAN TX ", " TX ").replace(" CAN RX ", " RX ")
+        match = re.match(r"^(\[[^\]]+\])\s+(.+?)\s+(TX|RX)\s+(.+)$", line)
+        if not match:
+            return line
+        label, step, direction, payload = match.groups()
+        return f"{label:<10} {step:<28} {direction:<2} {payload}"
 
     def extract_log_dir(self, text: str) -> None:
         for match in re.finditer(r"logs:\s*(.+)", text):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping
 
+from .caringcaribou_bridge import build_caringcaribou_command, run_caringcaribou, wants_caringcaribou
 from .canio import open_bus
 from .config import CanConfig, ConfigError, TargetConfig, TimingConfig, get_targets, get_testcases, load_config
 from .isotp import IsoTp
@@ -68,8 +69,8 @@ class Runner:
         if not self.targets:
             raise ConfigError("at least one target is required")
 
-        can_mod, bus = open_bus(self.can_cfg)
         rc = 0
+        native_cases: list[tuple[TargetConfig, dict[str, Any]]] = []
         try:
             for tc in selected:
                 target_name = str(tc.get("target", self.config.get("default_target", "default")))
@@ -77,18 +78,86 @@ class Runner:
                     raise ConfigError(f"testcase '{tc['name']}' references unknown target '{target_name}'")
                 target = self.targets[target_name]
                 merged_tc = normalize_testcase_metadata(tc)
-                merged_tc["_bus"] = bus
-                merged_tc["_can_module"] = can_mod
-                merged_tc["_authorized"] = True
-                case_rc = self._run_one(bus, can_mod, target, merged_tc)
-                rc = max(rc, case_rc)
+                if wants_caringcaribou(merged_tc):
+                    rc = max(rc, self._run_caringcaribou_one(target, merged_tc))
+                else:
+                    native_cases.append((target, merged_tc))
+            if native_cases:
+                can_mod, bus = open_bus(self.can_cfg)
+                try:
+                    for target, merged_tc in native_cases:
+                        merged_tc["_bus"] = bus
+                        merged_tc["_can_module"] = can_mod
+                        merged_tc["_authorized"] = True
+                        case_rc = self._run_one(bus, can_mod, target, merged_tc)
+                        rc = max(rc, case_rc)
+                finally:
+                    try:
+                        bus.shutdown()
+                    except Exception:
+                        pass
         finally:
             self.run_logger.close()
-            try:
-                bus.shutdown()
-            except Exception:
-                pass
         return rc
+
+    def _run_caringcaribou_one(self, target: TargetConfig, tc: dict[str, Any]) -> int:
+        label = test_id_label(tc)
+        session_flow = tc.get("session_flow", target.session_flow)
+        if isinstance(session_flow, list):
+            session_text = spaced(bytes(parse_byte(x) for x in session_flow))
+        else:
+            session_text = str(session_flow or "")
+        context = metadata_for_event(tc)
+        context.update({
+            "tx_id": can_id_hx(target.txid),
+            "rx_id": can_id_hx(target.rxid),
+            "session_flow": session_text,
+            "engine": "caringcaribou",
+        })
+        self.run_logger.set_testcase_context(**context)
+        self.console.set_test_context(label)
+        self.console.info(
+            "\n"
+            f"===== {tc.get('display_name', tc.get('name'))} =====\n"
+            f"Internal name: {tc['name']}\n"
+            f"Type: {tc.get('type', '')}\n"
+            f"Engine: CaringCaribou\n"
+            f"Target: {target.name}\n"
+            f"TX/RX: {can_id_hx(target.txid)} -> {can_id_hx(target.rxid)}\n"
+            f"Session flow: {session_text}"
+        )
+        try:
+            command = build_caringcaribou_command(tc, target, self.can_cfg)
+        except Exception as exc:
+            self.run_logger.event("caringcaribou_config_error", testcase=tc["name"], target=target.name, error=f"{type(exc).__name__}: {exc}")
+            self.console.info(f"  ABORT CaringCaribou config error: {type(exc).__name__}: {exc}")
+            self.console.set_test_context("")
+            self.run_logger.clear_testcase_context()
+            return 2
+
+        self.console.info(f"  CaringCaribou: {command.description}")
+        self.console.info("$ " + " ".join(command.argv))
+        self.run_logger.event("caringcaribou_start", testcase=tc["name"], target=target.name, command=command.argv, description=command.description)
+
+        def on_line(line: str) -> None:
+            if not line:
+                return
+            self.console.info(line)
+            self.run_logger.event("caringcaribou_output", testcase=tc["name"], target=target.name, line=line)
+
+        try:
+            rc = run_caringcaribou(command, cwd=str(Path.cwd()), line_callback=on_line)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            self.run_logger.event("caringcaribou_exception", testcase=tc["name"], target=target.name, error=f"{type(exc).__name__}: {exc}")
+            self.console.info(f"  ABORT CaringCaribou error: {type(exc).__name__}: {exc}")
+            rc = 1
+        self.run_logger.event("caringcaribou_finished", testcase=tc["name"], target=target.name, exit_code=rc)
+        self.console.info(f"  CaringCaribou finished exit_code={rc}")
+        self.console.set_test_context("")
+        self.run_logger.clear_testcase_context()
+        return int(rc or 0)
 
     def _run_one(self, bus: Any, can_mod: Any, target: TargetConfig, tc: dict[str, Any]) -> int:
         label = test_id_label(tc)
