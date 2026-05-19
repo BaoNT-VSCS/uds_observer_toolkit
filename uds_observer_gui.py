@@ -315,14 +315,21 @@ class UdsObserverGui(QMainWindow):
         self.extended_check = QCheckBox("29-bit extended CAN ID")
         target_layout.addRow("Target profile", self.target_combo)
         target_layout.addRow("Channel", self.channel_edit)
-        target_layout.addRow("Interface", self.interface_edit)
         target_layout.addRow("TX ID", self.txid_edit)
         target_layout.addRow("RX ID", self.rxid_edit)
-        target_layout.addRow("Padding byte", self.padding_edit)
-        target_layout.addRow("Timeout", self.timeout_edit)
-        target_layout.addRow("ResponsePending timeout", self.rp_timeout_edit)
-        target_layout.addRow("", self.extended_check)
         left_body_layout.addWidget(target_group)
+
+        self.advanced_target_group = QGroupBox("Advanced Target")
+        self.advanced_target_group.setCheckable(True)
+        self.advanced_target_group.setChecked(False)
+        advanced_target_layout = QFormLayout(self.advanced_target_group)
+        advanced_target_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        advanced_target_layout.addRow("Interface", self.interface_edit)
+        advanced_target_layout.addRow("Padding byte", self.padding_edit)
+        advanced_target_layout.addRow("Timeout", self.timeout_edit)
+        advanced_target_layout.addRow("ResponsePending timeout", self.rp_timeout_edit)
+        advanced_target_layout.addRow("", self.extended_check)
+        left_body_layout.addWidget(self.advanced_target_group)
 
         selector_group = QGroupBox("Testcase")
         selector_layout = QVBoxLayout(selector_group)
@@ -337,10 +344,22 @@ class UdsObserverGui(QMainWindow):
             selector_layout.addLayout(row)
         self.testcase_combo = QComboBox()
         selector_layout.addWidget(self.testcase_combo)
-        self.detail_view = QTextEdit()
-        self.detail_view.setReadOnly(True)
-        self.detail_view.setMinimumHeight(140)
-        selector_layout.addWidget(self.detail_view)
+        self.summary_id_label = QLabel("Test ID: -")
+        self.summary_title_label = QLabel("Title: -")
+        self.summary_type_label = QLabel("Type / mode: -")
+        self.summary_service_label = QLabel("Service: -")
+        self.summary_safety_label = QLabel("Safety: -")
+        self.summary_objective_label = QLabel("Objective: -")
+        for label in (
+            self.summary_id_label,
+            self.summary_title_label,
+            self.summary_type_label,
+            self.summary_service_label,
+            self.summary_safety_label,
+            self.summary_objective_label,
+        ):
+            label.setWordWrap(True)
+            selector_layout.addWidget(label)
         left_body_layout.addWidget(selector_group)
 
         self.parameters_group = QGroupBox("Testcase Parameters")
@@ -382,12 +401,11 @@ class UdsObserverGui(QMainWindow):
             safety_layout.addWidget(widget)
         left_body_layout.addWidget(safety_group)
 
-        effective_group = QGroupBox("Effective Config Preview")
+        effective_group = QGroupBox("Effective")
         effective_layout = QVBoxLayout(effective_group)
-        self.effective_preview = QTextEdit()
-        self.effective_preview.setReadOnly(True)
-        self.effective_preview.setMinimumHeight(150)
-        effective_layout.addWidget(self.effective_preview)
+        self.effective_status = QLabel("Effective: -")
+        self.effective_status.setWordWrap(True)
+        effective_layout.addWidget(self.effective_status)
         self.validation_view = QLabel("")
         self.validation_view.setWordWrap(True)
         effective_layout.addWidget(self.validation_view)
@@ -415,7 +433,7 @@ class UdsObserverGui(QMainWindow):
         run_row = QHBoxLayout()
         self.run_selected_btn = QPushButton("Run selected")
         self.run_selected_btn.setObjectName("runButton")
-        self.run_all_btn = QPushButton("Run all visible")
+        self.run_all_btn = QPushButton("Run visible")
         self.run_all_btn.setObjectName("runButton")
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setObjectName("stopButton")
@@ -492,6 +510,8 @@ class UdsObserverGui(QMainWindow):
         self.destructive_confirm_check.toggled.connect(self.update_effective_preview)
         self.advanced_yaml_group.toggled.connect(self.set_advanced_yaml_visible)
         self.advanced_params_group.toggled.connect(self.set_advanced_params_visible)
+        self.advanced_target_group.toggled.connect(self.set_advanced_target_visible)
+        self.set_advanced_target_visible(False)
         self.set_advanced_yaml_visible(False)
         self.set_advanced_params_visible(False)
 
@@ -504,6 +524,11 @@ class UdsObserverGui(QMainWindow):
     def set_advanced_yaml_visible(self, visible: bool) -> None:
         for child in self.advanced_yaml_group.findChildren(QWidget):
             if child is not self.advanced_yaml_group:
+                child.setVisible(visible)
+
+    def set_advanced_target_visible(self, visible: bool) -> None:
+        for child in self.advanced_target_group.findChildren(QWidget):
+            if child is not self.advanced_target_group:
                 child.setVisible(visible)
 
     def set_advanced_params_visible(self, visible: bool) -> None:
@@ -784,7 +809,7 @@ class UdsObserverGui(QMainWindow):
             return
         tc = self.current_testcase()
         if not tc:
-            self.effective_preview.clear()
+            self.effective_status.setText("Effective: -")
             self.command_preview_view.clear()
             self.run_selected_btn.setEnabled(False)
             return
@@ -792,16 +817,48 @@ class UdsObserverGui(QMainWindow):
             effective = self.effective_config_for_testcase(tc, include_current=True)
             self.current_validation = validate_effective_config(effective)
             preview = format_effective_config_preview(effective)
-            self.effective_preview.setPlainText(preview)
-            self.command_preview_view.setPlainText(preview)
+            self.effective_status.setText(self.compact_effective_status(effective))
+            self.command_preview_view.setPlainText(self.full_effective_preview(effective, preview))
             self.update_safety_badge(effective)
             self.update_validation_view()
         except Exception as exc:
             self.current_validation = [ValidationMessage("error", "config", str(exc))]
-            self.effective_preview.setPlainText(f"Invalid effective config:\n{exc}")
-            self.command_preview_view.setPlainText(self.effective_preview.toPlainText())
+            self.effective_status.setText(f"Effective: invalid ({exc})")
+            self.command_preview_view.setPlainText(f"Invalid effective config:\n{exc}")
             self.update_validation_view()
         self.run_selected_btn.setEnabled(not any(msg.severity == "error" for msg in self.current_validation))
+
+    def full_effective_preview(self, effective: Mapping[str, Any], summary: str) -> str:
+        command = [sys.executable, str(ROOT / "run_udstk.py"), "-c", "<runtime_config>", "--runs-dir", str(ROOT / "runs")]
+        if self.dry_run_check.isChecked():
+            command.append("--dry-run")
+        if self.authorized_check.isChecked():
+            command.append("--yes-i-am-authorized")
+        if self.show_process_check.isChecked():
+            command.append("--show-process")
+        if self.show_can_check.isChecked():
+            command.append("--show-can")
+        if self.verbose_check.isChecked():
+            command.append("--verbose")
+        cfg = copy.deepcopy(dict(effective))
+        return (
+            summary
+            + "\n\nbackend_execution_preview:\n  "
+            + " ".join(command)
+            + "\n\nfull_merged_runtime_config:\n"
+            + yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
+        )
+
+    def compact_effective_status(self, effective: Mapping[str, Any]) -> str:
+        info = effective.get("_gui_effective") or {}
+        params = info.get("effective_parameters") or {}
+        dry_run = "dry-run" if info.get("dry_run") else "transmit"
+        count = params.get("attempts", params.get("samples", params.get("max_items", "")))
+        suffix = f" | {count} items" if count not in ("", None) else ""
+        return (
+            f"Effective: {info.get('test_id', '')} | {info.get('target', '')} | "
+            f"{info.get('tx_id', '')} -> {info.get('rx_id', '')} | {dry_run}{suffix}"
+        )
 
     def update_safety_badge(self, effective: Mapping[str, Any]) -> None:
         tc = (effective.get("testcases") or [{}])[0]
@@ -993,37 +1050,25 @@ class UdsObserverGui(QMainWindow):
     def update_detail_card(self) -> None:
         tc = self.current_testcase()
         if not tc:
-            self.detail_view.setPlainText("No testcase available for the current filters.")
+            self.summary_id_label.setText("Test ID: -")
+            self.summary_title_label.setText("Title: No testcase available")
+            self.summary_type_label.setText("Type / mode: -")
+            self.summary_service_label.setText("Service: -")
+            self.summary_safety_label.setText("Safety: -")
+            self.summary_objective_label.setText("Objective: -")
             return
         ids = tc.get("test_ids") or []
-        lines = [
-            f"Test ID(s): {', '.join(ids) if ids else 'UNMAPPED'}",
-            f"Title: {tc.get('title', '')}",
-            f"Internal name: {tc.get('internal_name', tc.get('name', ''))}",
-            f"Source YAML: {tc.get('source_yaml', '')}",
-            f"Service: {tc.get('service', '')}",
-            f"Subfunction: {tc.get('subfunction', '')}",
-            f"Mode: {tc.get('mode', '')}",
-            f"Target: {tc.get('target', self.config.get('default_target', ''))}",
-            f"Group: {tc.get('group', '')}",
-            f"Category: {tc.get('category', '')}",
-            f"Safety: {tc.get('safety_level', '')}",
-            f"Destructive confirm required: {bool(tc.get('destructive_confirm_required', False))}",
-            "",
-            "Objective:",
-            str(tc.get("objective", "")),
-            "",
-            "Expected behavior:",
-            str(tc.get("expected_behavior", "")),
-            "",
-            "Threat condition:",
-            str(tc.get("threat_condition", "")),
-        ]
-        if tc.get("metadata_warning"):
-            lines.extend(["", "Warning:", str(tc["metadata_warning"])])
-        if tc.get("safety_level") == "disruptive" and not bool(tc.get("destructive_confirm", False)):
-            lines.extend(["", "Safety guard:", "Real transmission is blocked until destructive_confirm: true is set in YAML."])
-        self.detail_view.setPlainText("\n".join(lines))
+        objective = str(tc.get("objective", "") or "")
+        if len(objective) > 150:
+            objective = objective[:147].rstrip() + "..."
+        warning = " | metadata warning" if tc.get("metadata_warning") else ""
+        destructive = " | destructive guard" if tc.get("safety_level") == "disruptive" else ""
+        self.summary_id_label.setText(f"Test ID: {', '.join(ids) if ids else 'UNMAPPED'}")
+        self.summary_title_label.setText(f"Title: {tc.get('title', '')}")
+        self.summary_type_label.setText(f"Type / mode: {tc.get('type', '')} / {tc.get('mode', '')}")
+        self.summary_service_label.setText(f"Service: {tc.get('service', '')} {tc.get('subfunction', '')}".strip())
+        self.summary_safety_label.setText(f"Safety: {tc.get('safety_level', '')}{destructive}{warning}")
+        self.summary_objective_label.setText(f"Objective: {objective}")
 
     def selected_testcases(self, selected_only: bool) -> List[Dict[str, Any]]:
         if selected_only:
