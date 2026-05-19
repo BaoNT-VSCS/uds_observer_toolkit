@@ -23,7 +23,7 @@ except ImportError as exc:  # pragma: no cover - startup guard
     raise SystemExit(2) from exc
 
 try:
-    from PySide6.QtCore import QProcess, QProcessEnvironment, Qt, QUrl
+    from PySide6.QtCore import QEvent, QProcess, QProcessEnvironment, Qt, QUrl
     from PySide6.QtGui import QDesktopServices, QFont, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
@@ -256,8 +256,11 @@ class UdsObserverGui(QMainWindow):
         header.addWidget(title)
         header.addWidget(subtitle)
         header.addStretch(1)
+        self.maximize_btn = QPushButton("Maximize")
+        self.maximize_btn.setToolTip("Toggle maximized window size.")
         self.fullscreen_btn = QPushButton("Full screen")
-        self.fullscreen_btn.setToolTip("Toggle full screen (F11). Press Esc to leave full screen.")
+        self.fullscreen_btn.setToolTip("Toggle borderless full screen (F11). Press Esc to leave full screen.")
+        header.addWidget(self.maximize_btn)
         header.addWidget(self.fullscreen_btn)
         main.addLayout(header)
 
@@ -387,10 +390,10 @@ class UdsObserverGui(QMainWindow):
         self.can_view = self._make_log_view()
         self.verdict_view = self._make_log_view()
         self.evidence_view = self._make_log_view()
-        self.tabs.addTab(self.live_log_view, "Live Output")
-        self.tabs.addTab(self.can_view, "CAN Frames / TX-RX")
-        self.tabs.addTab(self.verdict_view, "Verdict Summary")
-        self.tabs.addTab(self.evidence_view, "Evidence Notes / Step Details")
+        self.tabs.addTab(self.live_log_view, "Live")
+        self.tabs.addTab(self.can_view, "CAN TX/RX")
+        self.tabs.addTab(self.verdict_view, "Verdicts")
+        self.tabs.addTab(self.evidence_view, "Evidence")
 
         log_buttons = QHBoxLayout()
         self.clear_log_btn = QPushButton("Clear evidence views")
@@ -403,6 +406,7 @@ class UdsObserverGui(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([430, 930])
 
+        self.maximize_btn.clicked.connect(self.toggle_maximized)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.add_cfg_btn.clicked.connect(self.add_config_file)
         self.remove_cfg_btn.clicked.connect(self.remove_config_file)
@@ -438,9 +442,28 @@ class UdsObserverGui(QMainWindow):
         if self.isFullScreen():
             self.showNormal()
             self.fullscreen_btn.setText("Full screen")
+            self.sync_window_action_labels()
         else:
             self.showFullScreen()
             self.fullscreen_btn.setText("Exit full screen")
+
+    def toggle_maximized(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self.sync_window_action_labels()
+
+    def changeEvent(self, event: Any) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.sync_window_action_labels()
+
+    def sync_window_action_labels(self) -> None:
+        self.maximize_btn.setText("Restore" if self.isMaximized() else "Maximize")
+        self.fullscreen_btn.setText("Exit full screen" if self.isFullScreen() else "Full screen")
 
     def add_config_file(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Add YAML config/testcase", str(ROOT), "YAML files (*.yaml *.yml)")
@@ -778,7 +801,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     win = UdsObserverGui()
-    win.show()
+    win.showMaximized()
+    win.sync_window_action_labels()
     return app.exec()
 
 
