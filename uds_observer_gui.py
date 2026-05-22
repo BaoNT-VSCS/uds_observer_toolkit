@@ -208,6 +208,80 @@ def format_arbid(value: int) -> str:
     return f"0x{value:X}"
 
 
+def normalize_did_hex(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?:0x)?([0-9A-Fa-f]{4})", raw)
+    if not match:
+        return raw
+    return f"0x{int(match.group(1), 16):04X}"
+
+
+def normalize_payload_hex(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        payload = parse_hex_payload(raw, name="message_hex", allow_empty=True, strict_bytes=True)
+    except ValueError:
+        return raw
+    return spaced(payload)
+
+
+def normalize_did_catalog_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Return one canonical DID row for UDS-21/UDS-22 workflows.
+
+    Canonical fields are:
+      did_hex             - 2-byte DID, e.g. 0xF190
+      did_length_bytes    - length of the readable DID data/message
+      did_message_hex     - message/data bytes returned by ReadDataByIdentifier
+
+    Older artifacts used data_hex/data_length_bytes; aliases are kept so existing
+    evidence files and GUI loaders continue to work.
+    """
+    normalized = dict(row)
+    did_hex = normalize_did_hex(
+        normalized.get("did_hex")
+        or normalized.get("did")
+        or normalized.get("identifier")
+        or normalized.get("DID")
+    )
+    message = (
+        normalized.get("did_message_hex")
+        or normalized.get("message_did")
+        or normalized.get("message_hex")
+        or normalized.get("data_hex")
+        or normalized.get("raw_data_hex")
+        or ""
+    )
+    message_hex = normalize_payload_hex(message)
+
+    length_value = (
+        normalized.get("did_length_bytes")
+        or normalized.get("length_did")
+        or normalized.get("length")
+        or normalized.get("data_length_bytes")
+        or ""
+    )
+    length_text = str(length_value or "").strip()
+    if not length_text and message_hex:
+        try:
+            length_text = str(len(parse_hex_payload(message_hex, name="did_message_hex", allow_empty=True, strict_bytes=True)))
+        except ValueError:
+            length_text = ""
+
+    normalized["did_hex"] = did_hex
+    normalized["did_length_bytes"] = length_text
+    normalized["did_message_hex"] = message_hex
+    # Backward-compatible aliases used by older summary/evidence logic.
+    normalized["data_length_bytes"] = length_text
+    normalized["data_hex"] = message_hex
+    normalized.setdefault("did_name", normalized.get("name", "UNKNOWN") or "UNKNOWN")
+    normalized.setdefault("notes", normalized.get("note", ""))
+    return normalized
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -573,8 +647,9 @@ def build_uds21_request(params: dict[str, Any]) -> bytes:
     generation = str(params.get("data_generation") or ("random" if params.get("randomize_data") else "explicit"))
 
     def parse_length() -> int:
+        raw_length = params.get("data_length_bytes") or params.get("did_length_bytes") or ""
         try:
-            value = int(str(params.get("data_length_bytes") or "").strip(), 10)
+            value = int(str(raw_length).strip(), 10)
         except ValueError as exc:
             raise ValueError("data_length_bytes must be a positive decimal integer") from exc
         if value <= 0:
@@ -582,21 +657,14 @@ def build_uds21_request(params: dict[str, Any]) -> bytes:
         return value
 
     if generation == "explicit":
-        data_text = str(params.get("data_hex") or "").strip()
+        # Explicit mode sends the supplied bytes as-is. The GUI keeps
+        # data_length_bytes as a hidden field for random/zero/pattern modes,
+        # so do not enforce that stale value here.
+        data_text = str(params.get("data_hex") or params.get("did_message_hex") or "").strip()
         data = parse_hex_payload(data_text, name="data_hex", strict_bytes=True)
-        length_text = str(params.get("data_length_bytes") or "").strip()
-        if length_text:
-            length = parse_length()
-            if len(data) != length:
-                raise ValueError(f"data_hex length must be {length} byte(s), got {len(data)}")
     elif generation == "random":
         length = parse_length()
-        seed_text = str(params.get("random_seed") or "").strip()
-        try:
-            rng = random.Random(int(seed_text, 0)) if seed_text else random.SystemRandom()
-        except ValueError as exc:
-            raise ValueError("random_seed must be an integer when provided") from exc
-        data = bytes(rng.randrange(0, 256) for _ in range(length))
+        data = bytes(random.SystemRandom().randrange(0, 256) for _ in range(length))
     elif generation == "zero":
         data = bytes([0x00] * parse_length())
     elif generation == "pattern":
@@ -1338,6 +1406,8 @@ def parse_did_dump_output(output: str, evidence_dir: Path) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     columns = [
         "did_hex",
+        "did_length_bytes",
+        "did_message_hex",
         "did_name",
         "raw_response_hex",
         "data_hex",
@@ -1366,12 +1436,17 @@ def parse_did_dump_output(output: str, evidence_dir: Path) -> dict[str, Any]:
             nrc = f"0x{raw[2]:02X}"
             nrc_meaning = nrc_to_text(raw[2])
             notes = "negative response"
+        did_message_hex = spaced(data)
+        did_length_bytes = len(data) if positive else ""
         rows.append({
             "did_hex": f"0x{did:04X}",
+            "did_length_bytes": did_length_bytes,
+            "did_message_hex": did_message_hex,
             "did_name": "UNKNOWN",
             "raw_response_hex": spaced(raw),
-            "data_hex": spaced(data),
-            "data_length_bytes": len(data) if positive else "",
+            # Backward-compatible aliases for older GUI/evidence readers.
+            "data_hex": did_message_hex,
+            "data_length_bytes": did_length_bytes,
             "positive_response": positive,
             "nrc": nrc,
             "nrc_meaning": nrc_meaning,
@@ -1734,21 +1809,20 @@ def build_registry() -> list[TestDefinition]:
             fields=(
                 SESSION_FLOW,
                 FieldSpec("did_hex", "DID", "text", "0xF190", True, "0xF190"),
-                FieldSpec("data_generation", "Data generation", "combo", "random", True, choices=(
-                    Choice("random bytes", "random"),
-                    Choice("zero bytes", "zero"),
-                    Choice("pattern byte", "pattern"),
+                FieldSpec("data_generation", "Write payload", "combo", "random", True, choices=(
+                    Choice("random bytes using selected DID length", "random"),
+                    Choice("zero bytes using selected DID length", "zero"),
+                    Choice("repeat pattern byte using selected DID length", "pattern"),
                     Choice("explicit data_hex", "explicit"),
                 )),
-                FieldSpec("data_length_bytes", "Data length bytes", "text", "4", True, visible_if=lambda p: p.get("data_generation") in {"random", "zero", "pattern"}),
+                FieldSpec("data_length_bytes", "DID length bytes", "text", "4", True, "Auto-filled from DID catalog / UDS-22 response", visible_if=lambda p: p.get("data_generation") in {"random", "zero", "pattern"}),
                 FieldSpec("pattern_byte", "Pattern byte", "text", "0xAA", False, visible_if=lambda p: p.get("data_generation") == "pattern"),
-                FieldSpec("data_hex", "Data hex", "textarea", "", False, "AA BB CC DD", visible_if=lambda p: p.get("data_generation") == "explicit"),
-                FieldSpec("random_seed", "Random seed", "text", "", False, visible_if=lambda p: p.get("data_generation") == "random"),
+                FieldSpec("data_hex", "Explicit write data", "textarea", "", False, "AA BB CC DD", visible_if=lambda p: p.get("data_generation") == "explicit"),
             ),
             build_request=build_uds21_request,
             validate=validate_uds21,
             verdict_rules=verdict_wdbi,
-            evidence_fields=("did_hex", "generated_or_supplied_data_hex", "request_hex", "response_hex", "verdict", "rationale"),
+            evidence_fields=("did_hex", "did_length_bytes", "generated_or_supplied_data_hex", "request_hex", "response_hex", "verdict", "rationale"),
         ),
         TestDefinition(
             id="uds_22",
@@ -1765,7 +1839,7 @@ def build_registry() -> list[TestDefinition]:
             build_request=build_uds22_request,
             validate=validate_uds22,
             verdict_rules=verdict_rdbi,
-            evidence_fields=("did_hex", "response_data_hex", "data_length_bytes", "sensitive_did", "verdict", "rationale"),
+            evidence_fields=("did_hex", "did_length_bytes", "did_message_hex", "response_data_hex", "data_length_bytes", "sensitive_did", "verdict", "rationale"),
         ),
         TestDefinition(
             id="uds_23",
@@ -2175,6 +2249,7 @@ class RunWorker(QThread):
             summary["request_hex"] = spaced(request)
             if self.test.id == "uds_21":
                 summary["did_hex"] = f"0x{request[1]:02X}{request[2]:02X}" if len(request) >= 3 else ""
+                summary["did_length_bytes"] = len(request[3:]) if len(request) > 3 else 0
                 summary["generated_or_supplied_data_hex"] = spaced(request[3:]) if len(request) > 3 else ""
             if self.test.id == "uds_22":
                 summary["did_hex"] = f"0x{request[1]:02X}{request[2]:02X}" if len(request) >= 3 else ""
@@ -2618,12 +2693,16 @@ class RunWorker(QThread):
         })
         if self.test.id == "uds_21":
             summary["did_hex"] = f"0x{request[1]:02X}{request[2]:02X}" if len(request) >= 3 else ""
+            summary["did_length_bytes"] = len(request[3:]) if len(request) > 3 else 0
             summary["generated_or_supplied_data_hex"] = spaced(request[3:]) if len(request) > 3 else ""
         if self.test.id == "uds_22":
             summary["did_hex"] = f"0x{request[1]:02X}{request[2]:02X}" if len(request) >= 3 else ""
             response_data = response[3:] if response and len(response) > 3 and response[:3] == bytes([0x62, request[1], request[2]]) else b""
-            summary["response_data_hex"] = spaced(response_data)
+            response_data_hex = spaced(response_data)
+            summary["response_data_hex"] = response_data_hex
+            summary["did_message_hex"] = response_data_hex
             summary["data_length_bytes"] = len(response_data)
+            summary["did_length_bytes"] = len(response_data)
         return summary
 
     def _open_uds_client(self) -> Any:
@@ -2969,7 +3048,7 @@ class UdsReconGui(QMainWindow):
         row.addWidget(self.use_did_btn)
         layout.addLayout(row)
         self.did_catalog_table = QTableWidget(0, 4)
-        self.did_catalog_table.setHorizontalHeaderLabels(["DID", "Name", "Length", "Notes"])
+        self.did_catalog_table.setHorizontalHeaderLabels(["DID", "Length", "Message DID", "Notes"])
         self.did_catalog_table.setMinimumHeight(90)
         self.did_catalog_table.setMaximumHeight(150)
         self.did_catalog_table.horizontalHeader().setStretchLastSection(True)
@@ -3393,34 +3472,50 @@ class UdsReconGui(QMainWindow):
                 for line in catalog_path.read_text(encoding="utf-8", errors="replace").splitlines():
                     match = re.search(r"(?:0x)?([0-9A-Fa-f]{4})", line)
                     if match:
-                        rows.append({"did_hex": f"0x{int(match.group(1), 16):04X}", "did_name": "UNKNOWN", "data_length_bytes": "", "notes": line.strip()})
+                        rows.append({"did_hex": f"0x{int(match.group(1), 16):04X}", "did_name": "UNKNOWN", "did_length_bytes": "", "did_message_hex": "", "data_length_bytes": "", "data_hex": "", "notes": line.strip()})
         except Exception as exc:
             QMessageBox.warning(self, "DID catalog error", str(exc))
             return
+        rows = [normalize_did_catalog_row(row) for row in rows]
         self.did_catalog_rows = rows
         self.did_catalog_table.setRowCount(0)
         for row in rows:
             idx = self.did_catalog_table.rowCount()
             self.did_catalog_table.insertRow(idx)
             self.did_catalog_table.setItem(idx, 0, QTableWidgetItem(str(row.get("did_hex", ""))))
-            self.did_catalog_table.setItem(idx, 1, QTableWidgetItem(str(row.get("did_name", "UNKNOWN"))))
-            self.did_catalog_table.setItem(idx, 2, QTableWidgetItem(str(row.get("data_length_bytes", ""))))
+            self.did_catalog_table.setItem(idx, 1, QTableWidgetItem(str(row.get("did_length_bytes", row.get("data_length_bytes", "")))))
+            self.did_catalog_table.setItem(idx, 2, QTableWidgetItem(str(row.get("did_message_hex", row.get("data_hex", "")))))
             self.did_catalog_table.setItem(idx, 3, QTableWidgetItem(str(row.get("notes", ""))))
-        self._append_log(f"Loaded DID catalog: {catalog_path}")
+        self.did_catalog_table.resizeColumnsToContents()
+        self._append_log(f"Loaded DID catalog: {catalog_path} ({len(rows)} DID rows)")
 
     def _use_selected_did(self) -> None:
         row = self.did_catalog_table.currentRow()
         if row < 0 or row >= len(self.did_catalog_rows):
             return
-        item = self.did_catalog_rows[row]
+        item = normalize_did_catalog_row(self.did_catalog_rows[row])
         did = str(item.get("did_hex", "")).strip()
+        length = str(item.get("did_length_bytes") or item.get("data_length_bytes") or "").strip()
+        message_hex = str(item.get("did_message_hex") or item.get("data_hex") or "").strip()
+
         if did and "did_hex" in self.field_widgets and isinstance(self.field_widgets["did_hex"], QLineEdit):
             self.field_widgets["did_hex"].setText(did)
-        length = str(item.get("data_length_bytes", "")).strip()
-        if self.current_test.id == "uds_21" and length and "data_length_bytes" in self.field_widgets:
-            widget = self.field_widgets["data_length_bytes"]
-            if isinstance(widget, QLineEdit):
-                widget.setText(length)
+
+        if self.current_test.id == "uds_21":
+            if length and "data_length_bytes" in self.field_widgets:
+                widget = self.field_widgets["data_length_bytes"]
+                if isinstance(widget, QLineEdit):
+                    widget.setText(length)
+            # If the operator switches UDS-21 to explicit data, reuse the DID
+            # message captured by UDS-22/recon as a baseline payload. Default
+            # random/zero/pattern modes still use the selected DID length only.
+            if message_hex and "data_hex" in self.field_widgets:
+                widget = self.field_widgets["data_hex"]
+                if isinstance(widget, QTextEdit):
+                    widget.setPlainText(message_hex)
+
+        self._append_log(f"Selected DID {did or '<unknown>'}; length={length or '<unknown>'}; message={message_hex or '<empty>'}")
+        self._refresh_validation_and_preview()
 
 
 def _assert_raises(fn: Callable[[], Any], expected_text: str) -> None:
@@ -3645,6 +3740,13 @@ def run_self_checks() -> None:
     summary_json = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary_json["verdict"] == "DRY_RUN / NOT_EXECUTED"
     assert (run_dir / "summary.md").exists() and (run_dir / "summary.json").exists()
+
+    did_dir = Path(tempfile.mkdtemp())
+    did_parsed = parse_did_dump_output("0xF190 62 F1 90 11 22 33 44", did_dir)
+    did_row = did_parsed["did_catalog"][0]
+    assert did_row["did_hex"] == "0xF190" and did_row["did_length_bytes"] == 4 and did_row["did_message_hex"] == "11 22 33 44"
+    csv_header = (did_dir / "did_catalog.csv").read_text(encoding="utf-8").splitlines()[0]
+    assert csv_header.startswith("did_hex,did_length_bytes,did_message_hex")
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
