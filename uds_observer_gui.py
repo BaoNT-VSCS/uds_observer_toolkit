@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -34,7 +34,6 @@ try:
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
-        QInputDialog,
         QLabel,
         QLineEdit,
         QMainWindow,
@@ -75,6 +74,8 @@ VERDICT_PASS_EXPECTED_DENIAL = "PASS_EXPECTED_DENIAL"
 VERDICT_FAIL_PRECONDITION_BYPASS = "FAIL_PRECONDITION_BYPASS"
 VERDICT_INCONCLUSIVE_NO_RESPONSE = "INCONCLUSIVE_NO_RESPONSE"
 VERDICT_INCONCLUSIVE_SETUP_ERROR = "INCONCLUSIVE_SETUP_ERROR"
+VERDICT_FAIL_READABLE_WITHOUT_SECURITY = "FAIL_READABLE_WITHOUT_SECURITY"
+VERDICT_INCONCLUSIVE_PARAMETER_OR_DID = "INCONCLUSIVE_PARAMETER_OR_DID"
 
 NRC_MEANINGS = {
     0x10: "generalReject",
@@ -238,52 +239,164 @@ def normalize_payload_hex(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    compact = re.sub(r"(?i)\b(?:message|data|value|payload|response)\b\s*=?", " ", raw)
+    compact = re.sub(r"[^0-9A-Fa-f]", "", compact)
+    if not compact:
+        return ""
+    if len(compact) % 2:
+        raise ValueError("message/data hex has odd length")
+    return spaced(bytes.fromhex(compact))
+
+
+def parse_did_note(note: str, *, source: str = "caringcaribou") -> ParsedDidRecord:
+    raw_note = str(note or "").strip()
+    did_match = re.search(r"(?i)(?<![0-9A-F])(?:0x)?([0-9A-F]{4})(?![0-9A-F])", raw_note)
+    if not did_match:
+        return ParsedDidRecord("", None, None, "", raw_note, source, "invalid", "no 2-byte DID token found")
+    did_int = int(did_match.group(1), 16)
+    did = f"0x{did_int:04X}"
+    remainder = raw_note[did_match.end():]
+    remainder = re.sub(r"(?i)\b(?:message|data|value|payload|response)\b\s*=?", " ", remainder)
+    tokens = [token[2:] if token.lower().startswith("0x") else token for token in re.findall(r"(?i)(?:0x)?[0-9A-F]+", remainder)]
+    compact = "".join(tokens)
+    if not compact:
+        return ParsedDidRecord(did, did_int, None, "", raw_note, source, "parsed_no_message")
+    if len(compact) % 2:
+        return ParsedDidRecord(did, did_int, None, "", raw_note, source, "invalid", "message/data hex has odd length")
     try:
-        payload = parse_hex_payload(raw, name="message_hex", allow_empty=True, strict_bytes=True)
+        payload = bytes.fromhex(compact)
+    except ValueError as exc:
+        return ParsedDidRecord(did, did_int, None, "", raw_note, source, "invalid", str(exc))
+    return ParsedDidRecord(did, did_int, len(payload), spaced(payload), raw_note, source, "parsed", length_source="parsed_from_notes")
+
+
+def _row_value(row: dict[str, Any], *names: str) -> Any:
+    lowered = {str(key).strip().lower().replace("_", " "): value for key, value in (row or {}).items()}
+    fallback: Any = ""
+    for name in names:
+        key = name.strip().lower().replace("_", " ")
+        if key in lowered and str(lowered[key] or "").strip():
+            return lowered[key]
+        if key in lowered:
+            fallback = lowered[key]
+    return fallback
+
+
+def _parse_length_value(value: Any) -> tuple[Optional[int], str]:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"unknown", "<unknown>", "none", "null"}:
+        return None, "unknown"
+    try:
+        parsed = int(raw, 0)
     except ValueError:
-        return raw
-    return spaced(payload)
+        return None, "unknown"
+    return (parsed, "csv_length") if parsed >= 0 else (None, "unknown")
 
 
-def normalize_did_catalog_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Normalize one DID catalog row for the paired UDS-22 -> UDS-21 workflow.
+def _did_record_to_row(record: ParsedDidRecord) -> dict[str, Any]:
+    length_text = "" if record.length is None else str(record.length)
+    row = {
+        "DID": record.did,
+        "Length": length_text,
+        "Message DID": record.message_hex,
+        "Notes": record.raw_note,
+        "Source": record.source,
+        "Parse Status": record.parse_status,
+        "Parse Error": record.parse_error,
+        "did": record.did,
+        "did_int": record.did_int if record.did_int is not None else "",
+        "length": record.length if record.length is not None else "",
+        "message_hex": record.message_hex,
+        "raw_note": record.raw_note,
+        "source": record.source,
+        "parse_status": record.parse_status,
+        "parse_error": record.parse_error,
+        "duplicate_count": record.duplicate_count,
+        "length_source": record.length_source,
+    }
+    row.update({
+        "did_hex": record.did,
+        "did_length_bytes": length_text,
+        "did_message_hex": record.message_hex,
+        "data_length_bytes": length_text,
+        "data_hex": record.message_hex,
+        "notes": record.raw_note,
+    })
+    return row
 
-    Primary fields:
-    - did_hex: 0xFFFF format
-    - did_length_bytes: byte length of the DID value/message bytes
-    - did_message_hex: DID value/message bytes only, excluding SID and DID echo
 
-    Backward-compatible aliases are kept for older evidence files:
-    - data_length_bytes
-    - data_hex
-    """
-    normalized = dict(row or {})
-    did = normalize_did_hex(normalized.get("did_hex") or normalized.get("did") or normalized.get("identifier"))
-    message_hex = normalize_payload_hex(
-        normalized.get("did_message_hex")
-        or normalized.get("message_hex")
-        or normalized.get("data_hex")
-        or normalized.get("response_data_hex")
-    )
-    length_text = str(
-        normalized.get("did_length_bytes")
-        or normalized.get("data_length_bytes")
-        or normalized.get("length")
-        or ""
-    ).strip()
-    if not length_text and message_hex:
-        try:
-            length_text = str(len(parse_hex_payload(message_hex, name="did_message_hex", allow_empty=True, strict_bytes=True)))
-        except ValueError:
-            length_text = ""
-    normalized["did_hex"] = did
-    normalized["did_length_bytes"] = length_text
-    normalized["did_message_hex"] = message_hex
-    normalized["data_length_bytes"] = length_text
-    normalized["data_hex"] = message_hex
-    normalized.setdefault("did_name", "UNKNOWN")
-    normalized.setdefault("notes", "")
-    return normalized
+def normalize_did_catalog_row(row: dict[str, Any], *, source: str = "csv") -> dict[str, Any]:
+    raw_note = str(_row_value(row, "Notes", "notes", "raw_note", "response_raw", "raw_response_hex") or "").strip()
+    did_text = _row_value(row, "DID", "did", "did_hex", "identifier")
+    did = normalize_did_hex(did_text)
+    did_int: Optional[int] = int(did[2:], 16) if re.fullmatch(r"0x[0-9A-F]{4}", did) else None
+
+    message_hex = ""
+    message_source = "unknown"
+    for key in ("Message DID", "message_hex", "did_message_hex", "data_hex", "response_data_hex"):
+        value = _row_value(row, key)
+        if str(value or "").strip():
+            try:
+                message_hex = normalize_payload_hex(value)
+                message_source = "csv_message"
+            except ValueError:
+                message_hex = ""
+            break
+
+    length, length_source = _parse_length_value(_row_value(row, "Length", "length", "did_length_bytes", "data_length_bytes"))
+    parsed_note = parse_did_note(raw_note, source="caringcaribou" if raw_note else source)
+    if did_int is None and parsed_note.did_int is not None:
+        did, did_int = parsed_note.did, parsed_note.did_int
+    if not message_hex and parsed_note.message_hex:
+        message_hex = parsed_note.message_hex
+        message_source = "parsed_from_notes"
+    if length is None and message_hex:
+        length = len(parse_hex_payload(message_hex, name="message_hex", allow_empty=True, strict_bytes=True))
+        length_source = message_source if message_source == "parsed_from_notes" else "csv_message"
+    if length is None and parsed_note.length is not None:
+        length = parsed_note.length
+        length_source = "parsed_from_notes"
+
+    if did_int is None:
+        record = ParsedDidRecord(did or "", None, None, message_hex, raw_note, source, "invalid", "no 2-byte DID token found")
+    else:
+        status = "parsed" if message_hex else "parsed_no_message"
+        record = ParsedDidRecord(did, did_int, length, message_hex, raw_note, parsed_note.source if raw_note else source, status, "", length_source=length_source)
+    return _did_record_to_row(record)
+
+
+def _did_row_score(row: dict[str, Any]) -> tuple[int, int]:
+    length_known = 1 if str(row.get("length", "")).strip() else 0
+    message_len = len(str(row.get("message_hex", "")).replace(" ", ""))
+    return length_known, message_len
+
+
+def normalize_did_catalog_rows(rows: list[dict[str, Any]], *, source: str = "csv") -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    by_did: dict[str, dict[str, Any]] = {}
+    duplicate_counts: Counter[str] = Counter()
+    invalid_rows = 0
+    raw_count = len(rows)
+    for row in rows:
+        normalized = normalize_did_catalog_row(row, source=source)
+        if normalized.get("parse_status") == "invalid" or not normalized.get("did"):
+            invalid_rows += 1
+            continue
+        did = str(normalized["did"])
+        duplicate_counts[did] += 1
+        existing = by_did.get(did)
+        if existing is None or _did_row_score(normalized) > _did_row_score(existing):
+            by_did[did] = normalized
+    normalized_rows = sorted(by_did.values(), key=lambda item: int(str(item["did"])[2:], 16))
+    for row in normalized_rows:
+        row["duplicate_count"] = duplicate_counts[str(row["did"])]
+    summary = {
+        "raw_rows": raw_count,
+        "normalized_dids": len(normalized_rows),
+        "known_length_dids": len([row for row in normalized_rows if str(row.get("length", "")).strip()]),
+        "failed_parse_rows": invalid_rows,
+        "duplicate_did_rows": sum(count - 1 for count in duplicate_counts.values() if count > 1),
+    }
+    return normalized_rows, summary
 
 
 def ensure_dir(path: Path) -> Path:
@@ -505,7 +618,6 @@ class TargetProfile:
     save_output: bool
     dry_run: bool
     authorized_disruptive: bool
-    disruptive_confirmation: str = ""
     operator_notes: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -541,7 +653,6 @@ class TargetProfile:
             "save_output": self.save_output,
             "dry_run": self.dry_run,
             "operator_authorization_confirmed": self.authorized_disruptive,
-            "disruptive_confirmation_entered": bool(self.disruptive_confirmation.strip()),
             "operator_notes": self.operator_notes,
         }
 
@@ -550,6 +661,20 @@ class TargetProfile:
 class Choice:
     label: str
     value: str
+
+
+@dataclass(frozen=True)
+class ParsedDidRecord:
+    did: str
+    did_int: Optional[int]
+    length: Optional[int]
+    message_hex: str
+    raw_note: str
+    source: str
+    parse_status: str
+    parse_error: str = ""
+    duplicate_count: int = 1
+    length_source: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -611,13 +736,29 @@ def field_enabled(spec: FieldSpec, params: dict[str, Any]) -> bool:
     return spec.enabled_if(params) if spec.enabled_if else True
 
 
-def _alfi_lengths(alfi: int) -> tuple[int, int]:
+def decode_alfi(alfi: int) -> tuple[int, int]:
     return alfi & 0x0F, (alfi >> 4) & 0x0F
+
+
+def _alfi_lengths(alfi: int) -> tuple[int, int]:
+    return decode_alfi(alfi)
+
+
+def memory_transfer_service_name(service_id: int) -> str:
+    if service_id == 0x34:
+        return "RequestDownload"
+    if service_id == 0x35:
+        return "RequestUpload"
+    raise ValueError("memory transfer service supports only SID 0x34 or 0x35")
+
+
+def get_memory_transfer_mode(params: dict[str, Any]) -> str:
+    return str(params.get("probe_mode") or "security_gate_probe")
 
 
 def memory_probe_annotation(service_id: int, alfi: int, address: bytes, size: bytes) -> str:
     address_len, size_len = _alfi_lengths(alfi)
-    service = "RequestDownload" if service_id == 0x34 else "RequestUpload"
+    service = memory_transfer_service_name(service_id)
     return (
         f"{service} Security Gate Probe; "
         f"DFI 0x00 = no compression / no encryption; "
@@ -654,9 +795,111 @@ def format_probe_candidate(candidate: ProbeCandidate) -> str:
     return f"{spaced(candidate.request)} | {candidate.annotation}"
 
 
+def dfi_annotation(dfi: int) -> str:
+    if dfi == 0x00:
+        return "DFI 0x00: no compression / no encryption"
+    return f"DFI 0x{dfi:02X}: OEM-specific data format"
+
+
+def alfi_annotation(alfi: int) -> str:
+    address_len, size_len = decode_alfi(alfi)
+    return f"ALFI 0x{alfi:02X}: address length {address_len} bytes, size length {size_len} bytes"
+
+
+def validate_manual_memory_transfer_request(dfi: int, alfi: int, memory_address: bytes, memory_size: bytes) -> None:
+    address_len, size_len = decode_alfi(alfi)
+    if address_len <= 0 or size_len <= 0:
+        raise ValueError(f"Invalid manual request: ALFI 0x{alfi:02X} requires non-zero address and size lengths.")
+    if len(memory_address) != address_len or len(memory_size) != size_len:
+        raise ValueError(
+            f"Invalid manual request: ALFI 0x{alfi:02X} requires {address_len} address bytes and {size_len} size bytes."
+        )
+
+
+def build_manual_memory_transfer_request(service_id: int, dfi: int, alfi: int, memory_address: bytes, memory_size: bytes) -> ProbeCandidate:
+    memory_transfer_service_name(service_id)
+    validate_manual_memory_transfer_request(dfi, alfi, memory_address, memory_size)
+    address_len, size_len = decode_alfi(alfi)
+    request = bytes([service_id, dfi, alfi]) + memory_address + memory_size
+    return ProbeCandidate(
+        request=request,
+        dfi=dfi,
+        alfi=alfi,
+        address_length=address_len,
+        size_length=size_len,
+        memory_address=memory_address,
+        memory_size=memory_size,
+        annotation=(
+            f"{memory_transfer_service_name(service_id)} Advanced Manual Request; "
+            f"DFI 0x{dfi:02X}; ALFI 0x{alfi:02X}; "
+            f"address={spaced(memory_address)}; size={spaced(memory_size)}"
+        ),
+    )
+
+
+def build_manual_memory_transfer_request_from_params(service_id: int, params: dict[str, Any]) -> ProbeCandidate:
+    dfi = validate_hex_byte(params.get("data_format_identifier"), "data_format_identifier")
+    alfi = validate_hex_byte(params.get("address_length_format_identifier"), "address_length_format_identifier")
+    memory_address = parse_hex_payload(params.get("memory_address_hex", ""), name="memory_address_hex", strict_bytes=True)
+    memory_size = parse_hex_payload(params.get("memory_size_hex", ""), name="memory_size_hex", strict_bytes=True)
+    return build_manual_memory_transfer_request(service_id, dfi, alfi, memory_address, memory_size)
+
+
+def memory_transfer_request_candidates(service_id: int, params: dict[str, Any]) -> list[ProbeCandidate]:
+    mode = get_memory_transfer_mode(params)
+    if mode == "security_gate_probe":
+        return build_memory_security_gate_probe_requests(service_id)
+    if mode == "advanced_manual_request":
+        return [build_manual_memory_transfer_request_from_params(service_id, params)]
+    raise ValueError("Mode must be Security Gate Probe or Advanced Manual Request")
+
+
+def format_memory_transfer_preview(service_id: int, params: dict[str, Any]) -> str:
+    mode = get_memory_transfer_mode(params)
+    service = memory_transfer_service_name(service_id)
+    mode_label = "Advanced Manual Request" if mode == "advanced_manual_request" else "Security Gate Probe"
+    lines = [
+        f"Mode: {mode_label}",
+        f"Target SID: 0x{service_id:02X} {service}",
+        "TransferData 0x36: disabled",
+        "RequestTransferExit 0x37: disabled",
+        "",
+    ]
+    if mode == "security_gate_probe":
+        lines.append("Candidates:")
+        for idx, candidate in enumerate(build_memory_security_gate_probe_requests(service_id), 1):
+            lines.extend([
+                f"{idx:02d}. {spaced(candidate.request)}",
+                f"    {dfi_annotation(candidate.dfi)}",
+                f"    {alfi_annotation(candidate.alfi)}",
+                f"    address: {spaced(candidate.memory_address)}",
+                f"    size:    {spaced(candidate.memory_size)}",
+                "",
+            ])
+        return "\n".join(lines).rstrip()
+
+    if mode == "advanced_manual_request":
+        candidate = build_manual_memory_transfer_request_from_params(service_id, params)
+        lines.extend([
+            "Manual mode sends one explicit 0x34/0x35 request using DFI, ALFI, memoryAddress, and memorySize. 0x36 is still disabled by default.",
+            "",
+            "Manual request:",
+            spaced(candidate.request),
+            "",
+            "Decoded:",
+            dfi_annotation(candidate.dfi),
+            alfi_annotation(candidate.alfi),
+            f"memoryAddress: {spaced(candidate.memory_address)}",
+            f"memorySize:    {spaced(candidate.memory_size)}",
+        ])
+        return "\n".join(lines)
+
+    raise ValueError("Mode must be Security Gate Probe or Advanced Manual Request")
+
+
 def build_memory_security_gate_probe_request(params: dict[str, Any]) -> bytes:
     service_id = parse_hex_byte(params.get("target_sid", "0x34"), "target_sid")
-    return build_memory_security_gate_probe_requests(service_id)[0].request
+    return memory_transfer_request_candidates(service_id, params)[0].request
 
 
 def build_uds20_request(params: dict[str, Any]) -> bytes:
@@ -671,6 +914,8 @@ def build_uds21_request(params: dict[str, Any]) -> bytes:
 
     def parse_length() -> int:
         raw_length = params.get("data_length_bytes") or params.get("did_length_bytes") or ""
+        if not str(raw_length or "").strip():
+            raise ValueError("Selected DID has unknown length. Enter DID length manually or select another DID.")
         try:
             value = int(str(raw_length).strip(), 10)
         except ValueError as exc:
@@ -689,7 +934,13 @@ def build_uds21_request(params: dict[str, Any]) -> bytes:
                 raise ValueError(f"data_hex length must be {length} byte(s), got {len(data)}")
     elif generation == "random":
         length = parse_length()
-        data = bytes(random.SystemRandom().randrange(0, 256) for _ in range(length))
+        fixed_payload = str(params.get("random_payload_hex") or "").strip()
+        if fixed_payload:
+            data = parse_hex_payload(fixed_payload, name="random_payload_hex", strict_bytes=True)
+            if len(data) != length:
+                raise ValueError(f"random_payload_hex length must be {length} byte(s), got {len(data)}")
+        else:
+            data = bytes(random.SystemRandom().randrange(0, 256) for _ in range(length))
     elif generation == "zero":
         data = bytes([0x00] * parse_length())
     elif generation == "pattern":
@@ -859,38 +1110,6 @@ def flow_contains_security_access(flow_text: str) -> bool:
     return False
 
 
-def disruptive_confirmation_token(test_id: str) -> str:
-    return {
-        "uds_13": "SEND_27_KEY",
-        "uds_14": "SEND_27_KEY",
-        "uds_16": "SEND_27_KEY",
-        "uds_17": "SEND_27_KEY",
-        "uds_18": "SEND_27_KEY",
-        "uds_20": "SEND_11",
-        "uds_21": "SEND_2E",
-        "uds_23": "SEND_34",
-        "uds_24": "SEND_35",
-        "uds_25": "SEND_28",
-    }.get(test_id, "")
-
-
-def disruptive_confirmation_prompt(test: TestDefinition) -> str:
-    service = {
-        "uds_13": "SecurityAccess SendKey 0x27",
-        "uds_14": "SecurityAccess SendKey 0x27",
-        "uds_16": "SecurityAccess SendKey 0x27",
-        "uds_17": "SecurityAccess SendKey 0x27",
-        "uds_18": "SecurityAccess SendKey 0x27",
-        "uds_20": "ECUReset 0x11",
-        "uds_21": "disruptive service 0x2E WriteDataByIdentifier",
-        "uds_23": "disruptive service 0x34 RequestDownload",
-        "uds_24": "disruptive service 0x35 RequestUpload",
-        "uds_25": "disruptive service 0x28 CommunicationControl",
-    }.get(test.id, "a disruptive UDS service")
-    token = disruptive_confirmation_token(test.id)
-    return f"This testcase sends {service}. Type {token} to continue."
-
-
 def validate_common_flows(_: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
     errors: dict[str, str] = {}
     if "session_flow" in params:
@@ -1028,7 +1247,7 @@ def validate_uds21(target: TargetProfile, params: dict[str, Any]) -> dict[str, s
         message = str(exc)
         if "did_hex" in message:
             errors["did_hex"] = message
-        elif "data_length" in message:
+        elif "data_length" in message or "unknown length" in message:
             errors["data_length_bytes"] = message
         elif "pattern_byte" in message:
             errors["pattern_byte"] = message
@@ -1051,10 +1270,24 @@ def validate_uds22(target: TargetProfile, params: dict[str, Any]) -> dict[str, s
 def validate_memory_security_gate_probe(sid: int) -> Callable[[TargetProfile, dict[str, Any]], dict[str, str]]:
     def _validate(target: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
         errors = validate_common_flows(target, params)
+        mode = get_memory_transfer_mode(params)
+        if mode not in {"security_gate_probe", "advanced_manual_request"}:
+            errors["probe_mode"] = "Mode must be Security Gate Probe or Advanced Manual Request"
+            return errors
         try:
-            build_memory_security_gate_probe_requests(sid)
+            memory_transfer_request_candidates(sid, params)
         except ValueError as exc:
-            errors["target_sid"] = str(exc)
+            message = str(exc)
+            if "data_format" in message:
+                errors["data_format_identifier"] = message
+            elif "address_length_format" in message or "ALFI" in message:
+                errors["address_length_format_identifier"] = message
+            elif "address" in message:
+                errors["memory_address_hex"] = message
+            elif "size" in message:
+                errors["memory_size_hex"] = message
+            else:
+                errors["target_sid"] = message
         return errors
     return _validate
 
@@ -1202,41 +1435,44 @@ def verdict_wdbi(request: bytes, response: Optional[bytes], params: dict[str, An
     parsed = parse_uds_response(request, response)
     did_ok = response is not None and len(response) >= 3 and response[:3] == bytes([0x6E, request[1], request[2]])
     if parsed.malformed:
-        return VERDICT_INCONCLUSIVE, parsed.note
+        return VERDICT_NEED_MANUAL_REVIEW, parsed.note
     if parsed.positive_response and did_ok:
-        return VERDICT_FAIL, "WriteDataByIdentifier was accepted without SecurityAccess in the supplied session flow."
+        return VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY, "WriteDataByIdentifier was accepted without SecurityAccess."
     if parsed.negative_response and parsed.nrc == 0x33:
-        return VERDICT_PASS, "ECU requires SecurityAccess for this WriteDataByIdentifier request."
-    if parsed.negative_response and parsed.nrc == 0x22:
-        return VERDICT_PASS, "ECU rejected write because required conditions or preconditions are not satisfied."
+        return VERDICT_PASS_SECURITY_GATE, "ECU requires SecurityAccess for WriteDataByIdentifier."
     if parsed.negative_response and parsed.nrc == 0x31:
-        return VERDICT_INCONCLUSIVE, "DID is out of range or not writable; this does not prove access control."
+        return VERDICT_INCONCLUSIVE_PARAMETER_OR_DID, "DID is out of range or not writable; this does not prove access control."
     if parsed.negative_response and parsed.nrc == 0x13:
-        return VERDICT_CONFIG, "ECU reported invalid request length or format."
+        return VERDICT_INVALID_REQUEST_FORMAT, "ECU reported invalid request length or format."
+    if parsed.negative_response and parsed.nrc == 0x11:
+        return VERDICT_SERVICE_NOT_SUPPORTED, "WriteDataByIdentifier is not supported."
+    if parsed.negative_response and parsed.nrc in {0x7E, 0x7F}:
+        return VERDICT_WRONG_SESSION, "WriteDataByIdentifier is not supported in the active diagnostic session."
     if response is None:
-        return VERDICT_INCONCLUSIVE, "No response to WriteDataByIdentifier request."
-    return VERDICT_INCONCLUSIVE, parsed.note
+        return VERDICT_NEED_MANUAL_REVIEW, "No response to WriteDataByIdentifier request."
+    return VERDICT_NEED_MANUAL_REVIEW, parsed.note
 
 
 def verdict_rdbi(request: bytes, response: Optional[bytes], params: dict[str, Any], observations: list[dict[str, Any]]) -> tuple[str, str]:
     parsed = parse_uds_response(request, response)
     did_ok = response is not None and len(response) >= 3 and response[:3] == bytes([0x62, request[1], request[2]])
     if parsed.malformed:
-        return VERDICT_INCONCLUSIVE, parsed.note
+        return VERDICT_NEED_MANUAL_REVIEW, parsed.note
     if parsed.positive_response and did_ok:
-        length = max(0, len(response or b"") - 3)
-        if params.get("sensitive_did"):
-            return VERDICT_FAIL, f"Sensitive DID was readable without SecurityAccess; response data length is {length} byte(s)."
-        return VERDICT_POTENTIAL, f"DID was readable without SecurityAccess; sensitivity is unknown or marked non-sensitive, data length {length} byte(s)."
+        return VERDICT_FAIL_READABLE_WITHOUT_SECURITY, "ReadDataByIdentifier returned data without SecurityAccess."
     if parsed.negative_response and parsed.nrc == 0x33:
-        return VERDICT_PASS, "ECU requires SecurityAccess for this ReadDataByIdentifier request."
-    if parsed.negative_response and parsed.nrc == 0x22:
-        return VERDICT_PASS, "ECU rejected read because required conditions or preconditions are not satisfied."
+        return VERDICT_PASS_SECURITY_GATE, "ECU requires SecurityAccess for ReadDataByIdentifier."
     if parsed.negative_response and parsed.nrc == 0x31:
-        return VERDICT_INCONCLUSIVE, "DID is unsupported or out of range; sensitivity cannot be evaluated."
+        return VERDICT_INCONCLUSIVE_PARAMETER_OR_DID, "DID is unsupported or out of range; sensitivity cannot be evaluated."
+    if parsed.negative_response and parsed.nrc == 0x13:
+        return VERDICT_INVALID_REQUEST_FORMAT, "ECU reported invalid request length or format."
+    if parsed.negative_response and parsed.nrc == 0x11:
+        return VERDICT_SERVICE_NOT_SUPPORTED, "ReadDataByIdentifier is not supported."
+    if parsed.negative_response and parsed.nrc in {0x7E, 0x7F}:
+        return VERDICT_WRONG_SESSION, "ReadDataByIdentifier is not supported in the active diagnostic session."
     if response is None:
-        return VERDICT_INCONCLUSIVE, "No response to ReadDataByIdentifier request."
-    return VERDICT_INCONCLUSIVE, parsed.note
+        return VERDICT_NEED_MANUAL_REVIEW, "No response to ReadDataByIdentifier request."
+    return VERDICT_NEED_MANUAL_REVIEW, parsed.note
 
 
 def security_access_observed_before_target(observations: list[dict[str, Any]], target_sid: int) -> bool:
@@ -1522,23 +1758,14 @@ def parse_services_output(output: str, evidence_dir: Path) -> dict[str, Any]:
 
 
 def parse_did_dump_output(output: str, evidence_dir: Path) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    columns = [
-        "did_hex",
-        "did_length_bytes",
-        "did_message_hex",
-        "did_name",
-        "raw_response_hex",
-        "data_hex",
-        "data_length_bytes",
-        "positive_response",
-        "nrc",
-        "nrc_meaning",
-        "notes",
-    ]
+    raw_rows: list[dict[str, Any]] = []
     for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         did_match = re.search(r"(?:DID\s*)?(?:0x)?([0-9A-Fa-f]{4})", line)
         if not did_match:
+            raw_rows.append({"Notes": line, "source": "caringcaribou"})
             continue
         did = int(did_match.group(1), 16)
         bytes_found = [int(x, 16) for x in re.findall(r"\b([0-9A-Fa-f]{2})\b", line)]
@@ -1555,7 +1782,7 @@ def parse_did_dump_output(output: str, evidence_dir: Path) -> dict[str, Any]:
             nrc = f"0x{raw[2]:02X}"
             nrc_meaning = nrc_to_text(raw[2])
             notes = "negative response"
-        row = normalize_did_catalog_row({
+        raw_rows.append({
             "did_hex": f"0x{did:04X}",
             "did_name": "UNKNOWN",
             "raw_response_hex": spaced(raw),
@@ -1568,9 +1795,12 @@ def parse_did_dump_output(output: str, evidence_dir: Path) -> dict[str, Any]:
             "nrc_meaning": nrc_meaning,
             "notes": notes,
         })
-        rows.append(row)
+    rows, summary = normalize_did_catalog_rows(raw_rows, source="caringcaribou")
+    columns = ["DID", "Length", "Message DID", "Notes", "Source", "Parse Status", "Parse Error"]
+    write_csv_json(evidence_dir, "parsed_did_catalog", rows, columns=columns)
     write_csv_json(evidence_dir, "did_catalog", rows, columns=columns)
-    return {"did_catalog": rows}
+    summary["parsed_did_catalog_csv"] = str(evidence_dir / "parsed_did_catalog.csv")
+    return {"did_catalog": rows, "did_parse_summary": summary}
 
 
 def write_csv_json(evidence_dir: Path, stem: str, rows: list[dict[str, Any]], *, columns: Optional[list[str]] = None) -> None:
@@ -1582,7 +1812,7 @@ def write_csv_json(evidence_dir: Path, stem: str, rows: list[dict[str, Any]], *,
                 csv.DictWriter(fh, fieldnames=fields).writeheader()
         return
     with (evidence_dir / f"{stem}.csv").open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1924,11 +2154,14 @@ def build_registry() -> list[TestDefinition]:
                 FieldSpec("data_length_bytes", "DID length bytes", "text", "4", True, "Auto-filled from DID catalog / UDS-22 response", visible_if=lambda p: p.get("data_generation") in {"random", "zero", "pattern"}),
                 FieldSpec("pattern_byte", "Pattern byte", "text", "0xAA", False, visible_if=lambda p: p.get("data_generation") == "pattern"),
                 FieldSpec("data_hex", "Explicit write data", "textarea", "", False, "AA BB CC DD", visible_if=lambda p: p.get("data_generation") == "explicit"),
+                FieldSpec("did_length_source", "DID length source", "text", "", False, visible_if=lambda p: False),
+                FieldSpec("catalog_length_bytes", "Catalog length bytes", "text", "", False, visible_if=lambda p: False),
+                FieldSpec("catalog_message_hex", "Catalog message", "textarea", "", False, visible_if=lambda p: False),
             ),
             build_request=build_uds21_request,
             validate=validate_uds21,
             verdict_rules=verdict_wdbi,
-            evidence_fields=("did_hex", "did_length_bytes", "generated_or_supplied_data_hex", "request_hex", "response_hex", "verdict", "rationale"),
+            evidence_fields=("selected_did", "did_length_source", "generated_payload_length", "request_hex", "response_hex", "verdict", "rationale", "security_access_observed_before_target"),
         ),
         TestDefinition(
             id="uds_22",
@@ -1941,45 +2174,61 @@ def build_registry() -> list[TestDefinition]:
                 FieldSpec("did_hex", "DID", "text", "0xF190", True, "0xF190"),
                 FieldSpec("did_length_bytes", "Selected DID length", "text", "", False, "Auto-filled from DID catalog when available", enabled_if=lambda p: False),
                 FieldSpec("did_message_hex", "Selected DID message", "textarea", "", False, "Auto-filled from DID catalog when available", enabled_if=lambda p: False),
+                FieldSpec("did_length_source", "DID length source", "text", "", False, visible_if=lambda p: False),
+                FieldSpec("catalog_length_bytes", "Catalog length bytes", "text", "", False, visible_if=lambda p: False),
                 FieldSpec("sensitive_did", "Sensitive DID", "checkbox", False),
                 FieldSpec("sensitivity_note", "Sensitivity note", "textarea", "", False),
             ),
             build_request=build_uds22_request,
             validate=validate_uds22,
             verdict_rules=verdict_rdbi,
-            evidence_fields=("did_hex", "did_length_bytes", "did_message_hex", "response_data_hex", "data_length_bytes", "sensitive_did", "verdict", "rationale"),
+            evidence_fields=("selected_did", "catalog_length", "catalog_message_hex", "request_hex", "response_hex", "verdict", "rationale", "security_access_observed_before_target"),
         ),
         TestDefinition(
             id="uds_23",
             title="UDS-23 Unauthenticated RequestDownload 0x34",
             category="UDS Test Cases",
-            description="Security Gate Probe for RequestDownload 0x34. Sends valid-format fixed candidates and verifies whether SecurityAccess is required.",
+            description="Checks whether RequestDownload 0x34 is accepted without SecurityAccess. Default mode sends fixed valid-format probe candidates only. No TransferData 0x36 is sent.",
             runner_kind="direct",
             disruptive=True,
             fields=(
                 SESSION_FLOW,
-                FieldSpec("probe_mode", "Mode", "combo", "security_gate_probe", True, choices=(Choice("Security Gate Probe", "security_gate_probe"),), enabled_if=lambda p: False),
+                FieldSpec("probe_mode", "Mode", "combo", "security_gate_probe", True, choices=(
+                    Choice("Security Gate Probe", "security_gate_probe"),
+                    Choice("Advanced Manual Request", "advanced_manual_request"),
+                )),
                 FieldSpec("target_sid", "Target SID", "text", "0x34", False, enabled_if=lambda p: False),
+                FieldSpec("data_format_identifier", "Data format identifier (DFI)", "text", "0x00", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
+                FieldSpec("address_length_format_identifier", "Address and length format identifier (ALFI)", "text", "0x44", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
+                FieldSpec("memory_address_hex", "Memory address", "text", "00 00 00 00", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
+                FieldSpec("memory_size_hex", "Memory size", "text", "00 00 00 01", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
             ),
             build_request=build_memory_security_gate_probe_request,
             validate=validate_memory_security_gate_probe(0x34),
-            evidence_fields=("test_case_id", "target_sid", "session_flow", "security_access_observed_before_target", "request_hex", "response_hex", "parsed_response", "verdict", "rationale", "transfer_data_sent"),
+            evidence_fields=("test_case_id", "mode", "target_sid", "session_flow", "dfi", "alfi", "memory_address", "memory_size", "security_access_observed_before_target", "request_hex", "response_hex", "parsed_response", "verdict", "rationale", "transfer_data_sent", "request_transfer_exit_sent"),
         ),
         TestDefinition(
             id="uds_24",
             title="UDS-24 Unauthenticated RequestUpload 0x35",
             category="UDS Test Cases",
-            description="Security Gate Probe for RequestUpload 0x35. Sends valid-format fixed candidates and verifies whether SecurityAccess is required.",
+            description="Checks whether RequestUpload 0x35 is accepted without SecurityAccess. Default mode sends fixed valid-format probe candidates only. No TransferData 0x36 is sent.",
             runner_kind="direct",
             disruptive=True,
             fields=(
                 SESSION_FLOW,
-                FieldSpec("probe_mode", "Mode", "combo", "security_gate_probe", True, choices=(Choice("Security Gate Probe", "security_gate_probe"),), enabled_if=lambda p: False),
+                FieldSpec("probe_mode", "Mode", "combo", "security_gate_probe", True, choices=(
+                    Choice("Security Gate Probe", "security_gate_probe"),
+                    Choice("Advanced Manual Request", "advanced_manual_request"),
+                )),
                 FieldSpec("target_sid", "Target SID", "text", "0x35", False, enabled_if=lambda p: False),
+                FieldSpec("data_format_identifier", "Data format identifier (DFI)", "text", "0x00", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
+                FieldSpec("address_length_format_identifier", "Address and length format identifier (ALFI)", "text", "0x44", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
+                FieldSpec("memory_address_hex", "Memory address", "text", "00 00 00 00", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
+                FieldSpec("memory_size_hex", "Memory size", "text", "00 00 00 01", True, visible_if=lambda p: p.get("probe_mode") == "advanced_manual_request"),
             ),
             build_request=build_memory_security_gate_probe_request,
             validate=validate_memory_security_gate_probe(0x35),
-            evidence_fields=("test_case_id", "target_sid", "session_flow", "security_access_observed_before_target", "request_hex", "response_hex", "parsed_response", "verdict", "rationale", "transfer_data_sent"),
+            evidence_fields=("test_case_id", "mode", "target_sid", "session_flow", "dfi", "alfi", "memory_address", "memory_size", "security_access_observed_before_target", "request_hex", "response_hex", "parsed_response", "verdict", "rationale", "transfer_data_sent", "request_transfer_exit_sent"),
         ),
         TestDefinition(
             id="uds_25",
@@ -2150,6 +2399,19 @@ class EvidenceWriter:
             "```json",
             json.dumps(summary.get("metrics", {}), indent=2),
             "```",
+        ]
+        did_parse_summary = summary.get("did_parse_summary") or (summary.get("metrics") if self.test.id == "recon_did_dump" else {})
+        if isinstance(did_parse_summary, dict) and did_parse_summary:
+            sections.extend([
+                "",
+                "## DID Catalog Normalization",
+                f"- Raw rows: {did_parse_summary.get('raw_rows', 0)}",
+                f"- Normalized DIDs: {did_parse_summary.get('normalized_dids', 0)}",
+                f"- DIDs with known length: {did_parse_summary.get('known_length_dids', 0)}",
+                f"- Rows that failed parsing: {did_parse_summary.get('failed_parse_rows', 0)}",
+                f"- Parsed catalog CSV: `{did_parse_summary.get('parsed_did_catalog_csv', '')}`",
+            ])
+        sections.extend([
             "",
             "## Operator Notes",
             str(target.get("operator_notes", "") or "<none>"),
@@ -2164,7 +2426,7 @@ class EvidenceWriter:
             f"- preview: `{summary.get('command_preview', '')}`",
             "",
             "## Safety Note",
-        ]
+        ])
         safety_notes = summary.get("safety_notes") or []
         if safety_notes:
             sections.extend(f"- {note}" for note in safety_notes)
@@ -2270,10 +2532,6 @@ class RunWorker(QThread):
 
     def _preflight_errors(self) -> dict[str, str]:
         errors: dict[str, str] = {}
-        if self.test.disruptive and not self.target.dry_run:
-            required_token = disruptive_confirmation_token(self.test.id)
-            if required_token and self.target.disruptive_confirmation.strip() != required_token:
-                errors["typed_confirmation"] = f"Type {required_token} before live execution of this disruptive service."
         if self.test.validate:
             errors.update(self.test.validate(self.target, self.params))
         elif self.test.build_request:
@@ -2286,7 +2544,7 @@ class RunWorker(QThread):
     def _safety_notes(self) -> list[str]:
         notes: list[str] = []
         if self.test.disruptive:
-            notes.append("This test uses a disruptive UDS service and requires explicit authorization for live execution.")
+            notes.append("This test uses a disruptive UDS service; run only with operator authorization.")
         if self.target.dry_run:
             notes.append("Dry run was enabled; no CAN request or external command was executed.")
         return notes
@@ -2351,21 +2609,26 @@ class RunWorker(QThread):
                 summary["requestseed_limit"] = []
         elif self.test.id in {"uds_23", "uds_24"}:
             service_id = 0x34 if self.test.id == "uds_23" else 0x35
-            candidates = build_memory_security_gate_probe_requests(service_id)
+            candidates = memory_transfer_request_candidates(service_id, self.params)
+            mode = get_memory_transfer_mode(self.params)
             summary["execution_steps"] = [{"step": "session_flow", "request_hex": req} for req in safe_expand_session_flow_hex(self.params.get("session_flow", ""))]
             summary["execution_steps"].extend({
-                "step": f"security_gate_probe_candidate_{idx + 1}",
+                "step": f"{mode}_{idx + 1}",
                 "request_hex": spaced(candidate.request),
                 "annotation": candidate.annotation,
             } for idx, candidate in enumerate(candidates))
             summary["request_hex"] = spaced(candidates[0].request)
             summary["test_case_id"] = self.test.id
+            summary["mode"] = "Advanced Manual Request" if mode == "advanced_manual_request" else "Security Gate Probe"
             summary["target_sid"] = f"0x{service_id:02X}"
             summary["parsed_response"] = {}
             summary["security_access_observed_before_target"] = False
             summary["security_access_absence_statement"] = "No SecurityAccess seed/key exchange was performed before the tested request."
             summary["transfer_data_sent"] = False
             summary["transfer_data_statement"] = "TransferData 0x36 was not sent."
+            summary["request_transfer_exit_sent"] = False
+            summary["request_transfer_exit_statement"] = "RequestTransferExit 0x37 was not sent."
+            summary.update(self._memory_security_gate_evidence(candidates[0]))
         elif self.test.id == "uds_25":
             request = build_uds25_request(self.params)
             restore = build_communication_control_restore_request(self.params)
@@ -2421,11 +2684,24 @@ class RunWorker(QThread):
         self.log_line.emit("$ " + command_preview_from_argv(cmd))
         evidence.add_transcript("ARGV " + json.dumps(cmd))
         evidence.add_transcript("$ " + command_preview_from_argv(cmd))
+        if evidence.save_output:
+            evidence.write_text("command.txt", "\n".join([
+                f"timestamp: {evidence.config['timestamp']}",
+                f"tool_function: {self.test.id}",
+                f"title: {self.test.title}",
+                f"command_line: {command_preview_from_argv(cmd)}",
+                f"argv: {json.dumps(cmd)}",
+                f"interface: {self.target.interface}",
+                f"channel: {self.target.channel}",
+                f"tester_tx_id: {format_arbid(self.target.tester_tx_id) if self.test.target_required else ''}",
+                f"tester_rx_id: {format_arbid(self.target.tester_rx_id) if self.test.target_required else ''}",
+                "",
+            ]))
         try:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
                 cwd=str(ROOT),
@@ -2433,18 +2709,24 @@ class RunWorker(QThread):
         except FileNotFoundError:
             return self._error_summary(evidence, VERDICT_CONFIG, "caringcaribou executable was not found in PATH.")
 
-        output_lines: list[str] = []
-        assert self._process.stdout is not None
-        for line in self._process.stdout:
-            if self._stop_requested:
-                break
-            line = line.rstrip("\n")
-            output_lines.append(line)
+        stdout, stderr = self._process.communicate()
+        if self._stop_requested and self._process.poll() is None:
+            self._process.terminate()
+        stdout_lines = stdout.splitlines()
+        stderr_lines = stderr.splitlines()
+        for line in stdout_lines:
             self.log_line.emit(line)
             evidence.add_transcript(line)
-        return_code = self._process.wait(timeout=5)
-        output = "\n".join(output_lines)
+        for line in stderr_lines:
+            self.log_line.emit(line)
+            evidence.add_transcript(f"STDERR {line}")
+        return_code = self._process.returncode
+        output = stdout + (("\n" if stdout and stderr else "") + stderr if stderr else "")
         evidence.raw_output = output
+        if evidence.save_output:
+            evidence.write_text("stdout.log", stdout)
+            evidence.write_text("stderr.log", stderr)
+            evidence.write_text("raw_output.log", output)
         parsed_extra: dict[str, Any] = {}
         if self.test.parse_external:
             parsed_extra = self.test.parse_external(output, evidence.dir)
@@ -2458,6 +2740,8 @@ class RunWorker(QThread):
             else f"External command exited with status {return_code}."
         )
         summary.update(parsed_extra)
+        if isinstance(parsed_extra.get("did_parse_summary"), dict):
+            summary["metrics"] = parsed_extra["did_parse_summary"]
         return summary
 
     def _emit_external_rows(self, parsed_extra: dict[str, Any]) -> None:
@@ -2786,7 +3070,7 @@ class RunWorker(QThread):
     def _invalid_security_setup_summary(self, evidence: EvidenceWriter, observations: list[dict[str, Any]], target_sid: int) -> dict[str, Any]:
         summary = self._base_summary(evidence)
         if target_sid in {0x34, 0x35}:
-            intended_request = build_memory_security_gate_probe_requests(target_sid)[0].request
+            intended_request = memory_transfer_request_candidates(target_sid, self.params)[0].request
         elif target_sid == 0x28:
             intended_request = build_uds25_request(self.params)
         else:
@@ -2796,6 +3080,8 @@ class RunWorker(QThread):
             extra.update({
                 "transfer_data_sent": False,
                 "transfer_data_statement": "TransferData 0x36 was not sent.",
+                "request_transfer_exit_sent": False,
+                "request_transfer_exit_statement": "RequestTransferExit 0x37 was not sent.",
             })
         if target_sid == 0x28:
             extra.update({
@@ -2821,9 +3107,9 @@ class RunWorker(QThread):
     def _memory_security_gate_evidence(self, candidate: ProbeCandidate) -> dict[str, Any]:
         return {
             "dfi": f"0x{candidate.dfi:02X}",
-            "dfi_annotation": "DFI 0x00 = no compression / no encryption",
+            "dfi_annotation": dfi_annotation(candidate.dfi),
             "alfi": f"0x{candidate.alfi:02X}",
-            "alfi_annotation": f"ALFI 0x{candidate.alfi:02X} = address length {candidate.address_length} bytes, size length {candidate.size_length} bytes",
+            "alfi_annotation": alfi_annotation(candidate.alfi),
             "address_length": candidate.address_length,
             "size_length": candidate.size_length,
             "memory_address": spaced(candidate.memory_address),
@@ -2833,6 +3119,9 @@ class RunWorker(QThread):
 
     def _run_memory_security_gate_probe(self, evidence: EvidenceWriter, service_id: int) -> dict[str, Any]:
         observations: list[dict[str, Any]] = []
+        mode = get_memory_transfer_mode(self.params)
+        mode_label = "Advanced Manual Request" if mode == "advanced_manual_request" else "Security Gate Probe"
+        candidates = memory_transfer_request_candidates(service_id, self.params)
         for note in self._safety_notes():
             self.log_line.emit(f"Safety note: {note}")
             evidence.add_transcript(f"SAFETY: {note}")
@@ -2842,14 +3131,18 @@ class RunWorker(QThread):
         if session_failure:
             session_failure.update({
                 "test_case_id": self.test.id,
+                "mode": mode_label,
                 "target_sid": f"0x{service_id:02X}",
-                "request_hex": spaced(build_memory_security_gate_probe_requests(service_id)[0].request),
+                "request_hex": spaced(candidates[0].request),
                 "parsed_response": {},
                 "security_access_observed_before_target": security_access_observed_before_target(observations, service_id),
                 "security_access_absence_statement": "No SecurityAccess seed/key exchange was performed before the tested request.",
                 "transfer_data_sent": False,
                 "transfer_data_statement": "TransferData 0x36 was not sent.",
+                "request_transfer_exit_sent": False,
+                "request_transfer_exit_statement": "RequestTransferExit 0x37 was not sent.",
             })
+            session_failure.update(self._memory_security_gate_evidence(candidates[0]))
             return session_failure
         if security_access_observed_before_target(observations, service_id):
             return self._invalid_security_setup_summary(evidence, observations, service_id)
@@ -2858,11 +3151,12 @@ class RunWorker(QThread):
         rationale = "No probe candidate produced a decisive response."
         response: Optional[bytes] = None
         parsed: Optional[UdsParsedResponse] = None
-        final_candidate = build_memory_security_gate_probe_requests(service_id)[0]
+        final_candidate = candidates[0]
         decisive = False
-        for idx, candidate in enumerate(build_memory_security_gate_probe_requests(service_id), 1):
-            self.log_line.emit(f"Memory security gate candidate {idx}: {format_probe_candidate(candidate)}")
-            evidence.add_transcript(f"CANDIDATE {idx} {format_probe_candidate(candidate)}")
+        for idx, candidate in enumerate(candidates, 1):
+            step_name = f"security_gate_probe_candidate_{idx}" if mode == "security_gate_probe" else "advanced_manual_request"
+            self.log_line.emit(f"Memory transfer {mode_label} request {idx}: {format_probe_candidate(candidate)}")
+            evidence.add_transcript(f"REQUEST {idx} {format_probe_candidate(candidate)}")
             exchange = self._send_uds(client, candidate.request)
             response = exchange.response
             verdict, rationale, decisive, parsed = classify_memory_transfer_probe_response(
@@ -2871,8 +3165,9 @@ class RunWorker(QThread):
                 response,
                 exchange.response_type,
             )
-            obs = self._observation(f"security_gate_probe_candidate_{idx}", candidate.request, response, parsed, exchange.error)
+            obs = self._observation(step_name, candidate.request, response, parsed, exchange.error)
             obs.update(self._memory_security_gate_evidence(candidate))
+            obs["mode"] = mode_label
             observations.append(obs)
             self.parsed_row.emit(obs)
             evidence.add_transcript(f"TEST TX {spaced(candidate.request)}")
@@ -2886,6 +3181,7 @@ class RunWorker(QThread):
         summary = self._base_summary(evidence)
         summary.update({
             "test_case_id": self.test.id,
+            "mode": mode_label,
             "target_sid": f"0x{service_id:02X}",
             "request_hex": spaced(final_candidate.request),
             "response_hex": spaced(response) if response else "",
@@ -2904,7 +3200,8 @@ class RunWorker(QThread):
             "transfer_data_sent": False,
             "transfer_data_statement": "TransferData 0x36 was not sent.",
             "request_transfer_exit_sent": False,
-            "candidate_requests": [format_probe_candidate(candidate) for candidate in build_memory_security_gate_probe_requests(service_id)],
+            "request_transfer_exit_statement": "RequestTransferExit 0x37 was not sent.",
+            "candidate_requests": [format_probe_candidate(candidate) for candidate in candidates] if mode == "security_gate_probe" else [],
         })
         summary.update(self._memory_security_gate_evidence(final_candidate))
         return summary
@@ -3076,6 +3373,20 @@ class RunWorker(QThread):
                 return summary
             time.sleep(self.target.delay)
 
+        if self.test.id in {"uds_21", "uds_22"} and security_access_observed_before_target(observations, request[0]):
+            summary = self._base_summary(evidence)
+            summary.update({
+                "request_hex": spaced(request),
+                "response_hex": "",
+                "parsed_response": {},
+                "security_access_observed_before_target": True,
+                "security_access_absence_statement": "SecurityAccess 0x27 was observed before the tested request; unauthenticated test aborted.",
+                "verdict": VERDICT_INVALID_TEST_SETUP,
+                "rationale": "A TX request starting with 0x27 occurred before the target service request.",
+                "observations": observations,
+            })
+            return summary
+
         exchange = self._send_uds(client, request)
         response = exchange.response
         parsed = parse_uds_response(request, response, transport_status=exchange.response_type)
@@ -3102,6 +3413,19 @@ class RunWorker(QThread):
             summary["did_hex"] = f"0x{request[1]:02X}{request[2]:02X}" if len(request) >= 3 else ""
             summary["did_length_bytes"] = len(request[3:]) if len(request) > 3 else 0
             summary["generated_or_supplied_data_hex"] = spaced(request[3:]) if len(request) > 3 else ""
+            summary["selected_did"] = summary["did_hex"]
+            catalog_length = str(self.params.get("catalog_length_bytes") or "").strip()
+            requested_length = str(self.params.get("data_length_bytes") or self.params.get("did_length_bytes") or "").strip()
+            source = self.params.get("did_length_source") or "unknown"
+            if catalog_length and requested_length and catalog_length != requested_length:
+                source = "manual_override"
+            elif requested_length and not catalog_length:
+                source = "manual_override"
+            summary["did_length_source"] = source
+            summary["generated_payload_length"] = len(request[3:]) if len(request) > 3 else 0
+            summary["parsed_response"] = parsed.__dict__
+            summary["security_access_observed_before_target"] = False
+            summary["security_access_absence_statement"] = "No SecurityAccess seed/key exchange was performed before the tested request."
         if self.test.id == "uds_22":
             summary["did_hex"] = f"0x{request[1]:02X}{request[2]:02X}" if len(request) >= 3 else ""
             response_data = response[3:] if response and len(response) > 3 and response[:3] == bytes([0x62, request[1], request[2]]) else b""
@@ -3110,6 +3434,12 @@ class RunWorker(QThread):
             summary["did_message_hex"] = response_data_hex
             summary["data_length_bytes"] = len(response_data)
             summary["did_length_bytes"] = len(response_data)
+            summary["selected_did"] = summary["did_hex"]
+            summary["catalog_length"] = self.params.get("catalog_length_bytes") or self.params.get("did_length_bytes", "")
+            summary["catalog_message_hex"] = self.params.get("did_message_hex", "")
+            summary["parsed_response"] = parsed.__dict__
+            summary["security_access_observed_before_target"] = False
+            summary["security_access_absence_statement"] = "No SecurityAccess seed/key exchange was performed before the tested request."
         return summary
 
     def _open_uds_client(self) -> Any:
@@ -3339,6 +3669,7 @@ class UdsReconGui(QMainWindow):
         self.output_dir = QLineEdit(str(DEFAULT_EVIDENCE_DIR))
         self.browse_output = QPushButton("Browse")
         self.save_output = QCheckBox("Save output")
+        self.save_output.setChecked(True)
         # Kept as hidden compatibility switches for backend paths; the operator UI is live-run first.
         self.dry_run = QCheckBox("Dry run")
         self.dry_run.setChecked(False)
@@ -3698,7 +4029,6 @@ class UdsReconGui(QMainWindow):
             save_output=self.save_output.isChecked(),
             dry_run=False,
             authorized_disruptive=False,
-            disruptive_confirmation="",
             operator_notes="",
         )
         return target, errors
@@ -3776,10 +4106,7 @@ class UdsReconGui(QMainWindow):
                 )
             elif self.current_test.id in {"uds_23", "uds_24"}:
                 service_id = 0x34 if self.current_test.id == "uds_23" else 0x35
-                preview = "\n".join(
-                    ["Security Gate Probe candidates. TransferData 0x36 will not be sent."]
-                    + [f"{idx + 1:02d}. {format_probe_candidate(candidate)}" for idx, candidate in enumerate(build_memory_security_gate_probe_requests(service_id))]
-                )
+                preview = format_memory_transfer_preview(service_id, params)
             elif self.current_test.id == "uds_25":
                 request = build_uds25_request(params)
                 restore = build_communication_control_restore_request(params)
@@ -3795,31 +4122,13 @@ class UdsReconGui(QMainWindow):
             lines.append("Fix validation errors before running:\n" + "\n".join(f"- {msg}" for msg in errors.values()))
         return "\n\n".join(lines)
 
-    def _confirmed_disruptive_target(self, target: TargetProfile) -> Optional[TargetProfile]:
-        required_token = disruptive_confirmation_token(self.current_test.id)
-        if not (self.current_test.disruptive and required_token and not target.dry_run):
-            return target
-        entered, ok = QInputDialog.getText(
-            self,
-            "Confirm disruptive testcase",
-            disruptive_confirmation_prompt(self.current_test),
-        )
-        if not ok or entered.strip() != required_token:
-            message = "Blocked: destructive ECUReset confirmation failed." if self.current_test.id == "uds_20" else "Blocked: destructive confirmation failed."
-            self._append_log(message)
-            QMessageBox.warning(self, "Execution blocked", message)
-            return None
-        return replace(target, authorized_disruptive=True, disruptive_confirmation=required_token)
-
     def _run_selected(self) -> None:
         self._refresh_validation_and_preview()
         if self.current_errors:
+            self._append_log("Validation error: " + "; ".join(self.current_errors.values()))
             QMessageBox.warning(self, "Validation error", "\n".join(self.current_errors.values()))
             return
         target, _ = self._collect_target()
-        if target is None:
-            return
-        target = self._confirmed_disruptive_target(target)
         if target is None:
             return
         if target.save_output:
@@ -3930,46 +4239,60 @@ class UdsReconGui(QMainWindow):
                     rows = list(csv.DictReader(fh))
             else:
                 for line in catalog_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                    match = re.search(r"(?:0x)?([0-9A-Fa-f]{4})", line)
-                    if match:
-                        rows.append({"did_hex": f"0x{int(match.group(1), 16):04X}", "did_name": "UNKNOWN", "did_length_bytes": "", "did_message_hex": "", "data_length_bytes": "", "data_hex": "", "notes": line.strip()})
+                    if line.strip():
+                        rows.append({"Notes": line.strip()})
         except Exception as exc:
             QMessageBox.warning(self, "DID catalog error", str(exc))
             return
-        rows = [normalize_did_catalog_row(row) for row in rows]
+        rows, summary = normalize_did_catalog_rows(rows, source="csv")
+        try:
+            normalized_path = catalog_path.with_name("parsed_did_catalog.csv")
+            with normalized_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=["DID", "Length", "Message DID", "Notes", "Source", "Parse Status", "Parse Error"], extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+            summary["parsed_did_catalog_csv"] = str(normalized_path)
+        except Exception as exc:
+            self._append_log(f"DID catalog normalization export warning: {type(exc).__name__}: {exc}")
         self.did_catalog_rows = rows
         self.did_catalog_table.setRowCount(0)
         for row in rows:
             idx = self.did_catalog_table.rowCount()
             self.did_catalog_table.insertRow(idx)
-            self.did_catalog_table.setItem(idx, 0, QTableWidgetItem(str(row.get("did_hex", ""))))
-            self.did_catalog_table.setItem(idx, 1, QTableWidgetItem(str(row.get("did_length_bytes", row.get("data_length_bytes", "")))))
-            self.did_catalog_table.setItem(idx, 2, QTableWidgetItem(str(row.get("did_message_hex", row.get("data_hex", "")))))
-            self.did_catalog_table.setItem(idx, 3, QTableWidgetItem(str(row.get("notes", ""))))
+            self.did_catalog_table.setItem(idx, 0, QTableWidgetItem(str(row.get("did", ""))))
+            self.did_catalog_table.setItem(idx, 1, QTableWidgetItem(str(row.get("length", ""))))
+            self.did_catalog_table.setItem(idx, 2, QTableWidgetItem(str(row.get("message_hex", ""))))
+            self.did_catalog_table.setItem(idx, 3, QTableWidgetItem(str(row.get("raw_note") or row.get("source", ""))))
         self.did_catalog_table.resizeColumnsToContents()
-        self._append_log(f"Loaded DID catalog: {catalog_path} ({len(rows)} DID rows)")
+        self._append_log(
+            f"Loaded DID catalog: {catalog_path} ({summary.get('normalized_dids', 0)} normalized DID rows, "
+            f"{summary.get('known_length_dids', 0)} with known length, {summary.get('failed_parse_rows', 0)} failed parse)"
+        )
 
     def _use_selected_did(self) -> None:
         row = self.did_catalog_table.currentRow()
         if row < 0 or row >= len(self.did_catalog_rows):
             return
         item = normalize_did_catalog_row(self.did_catalog_rows[row])
-        did = str(item.get("did_hex", "")).strip()
-        length = str(item.get("did_length_bytes") or item.get("data_length_bytes") or "").strip()
-        message_hex = str(item.get("did_message_hex") or item.get("data_hex") or "").strip()
+        did = str(item.get("did", "")).strip()
+        length = str(item.get("length") or "").strip()
+        message_hex = str(item.get("message_hex") or "").strip()
+        length_source = str(item.get("length_source") or "unknown").strip()
 
         if did and "did_hex" in self.field_widgets and isinstance(self.field_widgets["did_hex"], QLineEdit):
             self.field_widgets["did_hex"].setText(did)
 
         if self.current_test.id == "uds_21":
-            if length and "data_length_bytes" in self.field_widgets:
+            if "data_length_bytes" in self.field_widgets:
                 widget = self.field_widgets["data_length_bytes"]
                 if isinstance(widget, QLineEdit):
                     widget.setText(length)
-            if message_hex and "data_hex" in self.field_widgets:
-                widget = self.field_widgets["data_hex"]
-                if isinstance(widget, QTextEdit):
-                    widget.setPlainText(message_hex)
+            if "did_length_source" in self.field_widgets and isinstance(self.field_widgets["did_length_source"], QLineEdit):
+                self.field_widgets["did_length_source"].setText(length_source)
+            if "catalog_length_bytes" in self.field_widgets and isinstance(self.field_widgets["catalog_length_bytes"], QLineEdit):
+                self.field_widgets["catalog_length_bytes"].setText(length)
+            if "catalog_message_hex" in self.field_widgets and isinstance(self.field_widgets["catalog_message_hex"], QTextEdit):
+                self.field_widgets["catalog_message_hex"].setPlainText(message_hex)
 
         if self.current_test.id == "uds_22":
             if "did_length_bytes" in self.field_widgets:
@@ -3980,6 +4303,10 @@ class UdsReconGui(QMainWindow):
                 widget = self.field_widgets["did_message_hex"]
                 if isinstance(widget, QTextEdit):
                     widget.setPlainText(message_hex)
+            if "did_length_source" in self.field_widgets and isinstance(self.field_widgets["did_length_source"], QLineEdit):
+                self.field_widgets["did_length_source"].setText(length_source)
+            if "catalog_length_bytes" in self.field_widgets and isinstance(self.field_widgets["catalog_length_bytes"], QLineEdit):
+                self.field_widgets["catalog_length_bytes"].setText(length)
 
         self._append_log(f"Selected DID {did or '<unknown>'}; length={length or '<unknown>'}; message={message_hex or '<empty>'}")
         self._refresh_validation_and_preview()
@@ -4028,8 +4355,28 @@ def run_self_checks() -> None:
         "data_generation": "explicit",
         "data_hex": "C",
     }), "full bytes")
+    parsed_note = parse_did_note("0xfad3 ffff0005")
+    assert parsed_note.did == "0xFAD3" and parsed_note.message_hex == "FF FF 00 05" and parsed_note.length == 4 and parsed_note.parse_status == "parsed"
+    parsed_note = parse_did_note("0xFAD3 FF FF 00 05")
+    assert parsed_note.did == "0xFAD3" and parsed_note.message_hex == "FF FF 00 05" and parsed_note.length == 4
+    parsed_note = parse_did_note("FAD3")
+    assert parsed_note.did == "0xFAD3" and parsed_note.length is None and parsed_note.parse_status == "parsed_no_message"
+    parsed_note = parse_did_note("0xFAD3; message=ffff0005")
+    assert parsed_note.did == "0xFAD3" and parsed_note.message_hex == "FF FF 00 05" and parsed_note.length == 4
+    assert parse_did_note("bad data").parse_status == "invalid"
+    normalized = normalize_did_catalog_row({"DID": "0xFAD3", "Length": "", "Message DID": "", "Notes": "0xfad3 ffff0005"})
+    assert normalized["DID"] == "0xFAD3" and str(normalized["Length"]) == "4" and normalized["Message DID"] == "FF FF 00 05"
+    normalized = normalize_did_catalog_row({"DID": "", "Length": "", "Message DID": "", "Notes": "0xfad3 ffff0005"})
+    assert normalized["DID"] == "0xFAD3" and str(normalized["Length"]) == "4" and normalized["Message DID"] == "FF FF 00 05"
+    assert spaced(build_uds21_request({
+        "did_hex": "0xFAD3",
+        "data_generation": "random",
+        "data_length_bytes": "4",
+        "random_payload_hex": "DC 41 80 88",
+    })) == "2E FA D3 DC 41 80 88"
 
     assert spaced(build_uds22_request({"did_hex": "0xF190"})) == "22 F1 90"
+    assert spaced(build_uds22_request({"did_hex": "0xFAD3"})) == "22 FA D3"
 
     uds23_candidates = build_memory_security_gate_probe_requests(0x34)
     assert [spaced(candidate.request) for candidate in uds23_candidates] == [
@@ -4044,6 +4391,31 @@ def run_self_checks() -> None:
         "35 00 22 00 00 00 01",
     ]
     assert "DFI 0x00" in uds23_candidates[0].annotation and "ALFI 0x44" in uds23_candidates[0].annotation
+    assert decode_alfi(0x44) == (4, 4)
+    assert decode_alfi(0x24) == (4, 2)
+    manual_uds23 = build_manual_memory_transfer_request(
+        0x34,
+        0x00,
+        0x44,
+        bytes.fromhex("00 00 00 00"),
+        bytes.fromhex("00 00 00 01"),
+    )
+    assert spaced(manual_uds23.request) == "34 00 44 00 00 00 00 00 00 00 01"
+    manual_uds24 = build_manual_memory_transfer_request(
+        0x35,
+        0x00,
+        0x44,
+        bytes.fromhex("00 00 00 00"),
+        bytes.fromhex("00 00 00 01"),
+    )
+    assert spaced(manual_uds24.request) == "35 00 44 00 00 00 00 00 00 00 01"
+    _assert_raises(lambda: build_manual_memory_transfer_request(
+        0x34,
+        0x00,
+        0x44,
+        bytes.fromhex("00 00"),
+        bytes.fromhex("00 00 00 01"),
+    ), "requires 4 address bytes and 4 size bytes")
 
     assert spaced(build_uds25_request({
         "control_type": "0x01",
@@ -4058,17 +4430,30 @@ def run_self_checks() -> None:
     assert negative.negative_response and negative.nrc == 0x33 and negative.nrc_meaning == "securityAccessDenied"
 
     no_response_verdict, _ = verdict_rdbi(bytes.fromhex("22 F1 90"), None, {"sensitive_did": False}, [])
-    assert no_response_verdict == VERDICT_INCONCLUSIVE
+    assert no_response_verdict == VERDICT_NEED_MANUAL_REVIEW
 
     unrelated = parse_uds_response(bytes.fromhex("22 F1 90"), bytes.fromhex("7F 10 33"))
     assert unrelated.malformed and not unrelated.negative_response
     malformed_verdict, _ = verdict_rdbi(bytes.fromhex("22 F1 90"), bytes.fromhex("7F 10 33"), {"sensitive_did": False}, [])
-    assert malformed_verdict == VERDICT_INCONCLUSIVE
+    assert malformed_verdict == VERDICT_NEED_MANUAL_REVIEW
     unexpected_sid_verdict, _ = verdict_rdbi(bytes.fromhex("22 F1 90"), bytes.fromhex("61 F1 90"), {"sensitive_did": False}, [])
-    assert unexpected_sid_verdict == VERDICT_INCONCLUSIVE
+    assert unexpected_sid_verdict == VERDICT_NEED_MANUAL_REVIEW
 
     potential_verdict, _ = verdict_rdbi(bytes.fromhex("22 F1 90"), bytes.fromhex("62 F1 90 12 34"), {"sensitive_did": False}, [])
-    assert potential_verdict == VERDICT_POTENTIAL
+    assert potential_verdict == VERDICT_FAIL_READABLE_WITHOUT_SECURITY
+    uds21_verdict, _ = verdict_wdbi(bytes.fromhex("2E FA D3 DC 41 80 88"), bytes.fromhex("6E FA D3"), {}, [])
+    assert uds21_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
+    uds21_verdict, _ = verdict_wdbi(bytes.fromhex("2E FA D3 DC 41 80 88"), bytes.fromhex("7F 2E 33"), {}, [])
+    assert uds21_verdict == VERDICT_PASS_SECURITY_GATE
+    uds22_verdict, _ = verdict_rdbi(bytes.fromhex("22 FA D3"), bytes.fromhex("62 FA D3 01 02"), {}, [])
+    assert uds22_verdict == VERDICT_FAIL_READABLE_WITHOUT_SECURITY
+    uds22_verdict, _ = verdict_rdbi(bytes.fromhex("22 FA D3"), bytes.fromhex("7F 22 33"), {}, [])
+    assert uds22_verdict == VERDICT_PASS_SECURITY_GATE
+    assert security_access_observed_before_target([
+        {"request_hex": "10 03"},
+        {"request_hex": "27 01"},
+        {"request_hex": "2E FA D3 DC 41 80 88"},
+    ], 0x2E)
     no_response_reset, _ = verdict_reset(bytes.fromhex("11 01"), None, {}, [])
     assert no_response_reset == VERDICT_INCONCLUSIVE
     uds20_params = {"acceptable_nrcs": "0x22 0x24 0x31 0x33 0x7E 0x7F"}
@@ -4088,6 +4473,10 @@ def run_self_checks() -> None:
     assert memory_verdict == VERDICT_SERVICE_NOT_SUPPORTED
     memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x35, uds24_candidates[0].request, bytes.fromhex("75 20 00"))
     assert memory_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
+    memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x34, manual_uds23.request, bytes.fromhex("7F 34 33"))
+    assert memory_verdict == VERDICT_PASS_SECURITY_GATE
+    memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x35, manual_uds24.request, bytes.fromhex("75 20 00"))
+    assert memory_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
 
     comm_verdict, _, _ = classify_communication_control_response(bytes.fromhex("28 01 01"), bytes.fromhex("68 01"))
     assert comm_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
@@ -4101,8 +4490,8 @@ def run_self_checks() -> None:
         {"request_hex": "34 00 44 00 00 00 00 00 00 00 01"},
     ], 0x34)
 
-    def mk_target(*, dry_run: bool, authorized: bool, confirmation: str = "", output_dir: Path = DEFAULT_EVIDENCE_DIR) -> TargetProfile:
-        return TargetProfile("socketcan", "can0", 0x681, 0x601, False, 0x00, 1.0, 5.0, 0.05, 0.0, 3.0, output_dir, True, dry_run, authorized, confirmation)
+    def mk_target(*, dry_run: bool, authorized: bool, output_dir: Path = DEFAULT_EVIDENCE_DIR) -> TargetProfile:
+        return TargetProfile("socketcan", "can0", 0x681, 0x601, False, 0x00, 1.0, 5.0, 0.05, 0.0, 3.0, output_dir, True, dry_run, authorized)
 
     uds20_test = next(t for t in build_registry() if t.id == "uds_20")
     assert [field.id for field in uds20_test.fields] == ["precondition_session_flow", "test_session_flow", "reset_subfunction", "acceptable_nrcs"]
@@ -4110,18 +4499,7 @@ def run_self_checks() -> None:
     equal_flow_errors = validate_uds20(mk_target(dry_run=True, authorized=False), default_params_for_test(uds20_test) | {"precondition_session_flow": "03", "test_session_flow": "03"})
     assert equal_flow_errors["test_session_flow"] == "Invalid UDS-20 setup: test_session_flow must differ from precondition_session_flow."
 
-    target = mk_target(dry_run=False, authorized=False)
-    test = next(t for t in build_registry() if t.id == "uds_23")
-    worker = RunWorker(test, target, default_params_for_test(test) | {"session_flow": ""}, "")
-    assert "typed_confirmation" in worker._preflight_errors()
-
-    target_authorized_no_token = mk_target(dry_run=False, authorized=True)
-    worker = RunWorker(test, target_authorized_no_token, default_params_for_test(test) | {"session_flow": ""}, "")
-    assert "typed_confirmation" in worker._preflight_errors()
-
     target_dry = mk_target(dry_run=True, authorized=False)
-    worker = RunWorker(test, target_dry, default_params_for_test(test) | {"session_flow": ""}, "")
-    assert "typed_confirmation" not in worker._preflight_errors()
 
     registry = {t.id: t for t in build_registry()}
     for test_id in ("recon_discovery", "recon_services", "recon_did_dump", "recon_subservices"):
@@ -4170,11 +4548,31 @@ def run_self_checks() -> None:
         assert test_def.summary_template
 
     reg = {t.id: t for t in registry_list}
+    for test_id in ("uds_23", "uds_24"):
+        mode_field = next(field for field in reg[test_id].fields if field.id == "probe_mode")
+        assert [choice.label for choice in mode_field.choices] == ["Security Gate Probe", "Advanced Manual Request"]
+    manual_params = default_params_for_test(reg["uds_23"]) | {
+        "probe_mode": "advanced_manual_request",
+        "data_format_identifier": "0x00",
+        "address_length_format_identifier": "0x44",
+        "memory_address_hex": "00 00 00 00",
+        "memory_size_hex": "00 00 00 01",
+    }
+    manual_candidate = memory_transfer_request_candidates(0x34, manual_params)[0]
+    assert spaced(manual_candidate.request) == "34 00 44 00 00 00 00 00 00 00 01"
+    manual_worker = RunWorker(reg["uds_23"], mk_target(dry_run=True, authorized=False), manual_params, "")
+    manual_evidence = manual_worker._memory_security_gate_evidence(manual_candidate)
+    assert manual_evidence["dfi"] == "0x00" and manual_evidence["alfi"] == "0x44"
+    assert manual_evidence["memory_address"] == "00 00 00 00" and manual_evidence["memory_size"] == "00 00 00 01"
+    manual_summary = manual_worker._dry_run(EvidenceWriter(Path(tempfile.mkdtemp()), reg["uds_23"], manual_worker.target, manual_params))
+    assert manual_summary["mode"] == "Advanced Manual Request"
+    assert manual_summary["request_hex"] == "34 00 44 00 00 00 00 00 00 00 01"
+    assert manual_summary["transfer_data_statement"] == "TransferData 0x36 was not sent."
+    assert manual_summary["request_transfer_exit_statement"] == "RequestTransferExit 0x37 was not sent."
     assert len([s for s in security_access_plan("uds_10", default_params_for_test(reg["uds_10"])) if "request_seed" in s["step"]]) == 10
     uds11_plan = security_access_plan("uds_11", default_params_for_test(reg["uds_11"]))
     assert len([s for s in uds11_plan if "request_seed" in s["step"]]) == 20
     assert not any("send_key" in s["step"] for s in uds11_plan)
-    import tempfile
     seed_csv_dir = Path(tempfile.mkdtemp())
     seed_csv = seed_csv_dir / "seed_samples.csv"
     seed_csv.write_text("seed_hex\nAA BB CC DD\n01 02\n", encoding="utf-8")
@@ -4183,8 +4581,6 @@ def run_self_checks() -> None:
     assert length_verdict == "FAIL/FINDING"
     limit_verdict, _ = verdict_requestseed_limit({"continuous_seed_after_threshold": True, "nrc36_count": 0, "nrc37_count": 0, "nrc24_count": 0}, {"enforcement_expected_after_count": "5"})
     assert limit_verdict == "FAIL/SUSPICIOUS"
-    uds13_worker = RunWorker(reg["uds_13"], mk_target(dry_run=False, authorized=True), default_params_for_test(reg["uds_13"]), "")
-    assert "typed_confirmation" in uds13_worker._preflight_errors()
     assert any(s["step"] == "stale_seed_wait" for s in security_access_plan("uds_14", default_params_for_test(reg["uds_14"])))
     assert len([s for s in security_access_plan("uds_16", default_params_for_test(reg["uds_16"])) if "send_key_attempt" in s["step"]]) == 5
     assert len([s for s in security_access_plan("uds_17", default_params_for_test(reg["uds_17"])) if "request_seed" in s["step"]]) == 5
@@ -4194,17 +4590,9 @@ def run_self_checks() -> None:
     assert uds19_verdict == "FAIL/SUSPICIOUS"
     assert nrc_to_text(0x7F) == "serviceNotSupportedInActiveSession"
     assert nrc_to_text(0x7E) == "subFunctionNotSupportedInActiveSession"
-    dry_sendkey_worker = RunWorker(reg["uds_13"], mk_target(dry_run=True, authorized=False), default_params_for_test(reg["uds_13"]), "")
-    assert "typed_confirmation" not in dry_sendkey_worker._preflight_errors()
-    live_sendkey_worker = RunWorker(reg["uds_13"], mk_target(dry_run=False, authorized=False, confirmation="SEND_27_KEY"), default_params_for_test(reg["uds_13"]), "")
-    assert "typed_confirmation" not in live_sendkey_worker._preflight_errors()
-    live_sendkey_ok = RunWorker(reg["uds_13"], mk_target(dry_run=False, authorized=True, confirmation="SEND_27_KEY"), default_params_for_test(reg["uds_13"]), "")
-    assert "typed_confirmation" not in live_sendkey_ok._preflight_errors()
     valid_policy_params = default_params_for_test(reg["uds_16"])
     valid_policy_params["key_policy"] = "valid_algorithm_if_available"
     assert "key_policy" in RunWorker(reg["uds_16"], mk_target(dry_run=True, authorized=False), valid_policy_params, "")._preflight_errors()
-    uds21_live = RunWorker(reg["uds_21"], mk_target(dry_run=False, authorized=True), default_params_for_test(reg["uds_21"]), "")
-    assert "typed_confirmation" in uds21_live._preflight_errors()
 
     report_dir = Path(tempfile.mkdtemp())
     dry_summary_target = mk_target(dry_run=True, authorized=False, output_dir=report_dir)
@@ -4222,7 +4610,7 @@ def run_self_checks() -> None:
     did_row = did_parsed["did_catalog"][0]
     assert did_row["did_hex"] == "0xF190" and str(did_row["did_length_bytes"]) == "4" and did_row["did_message_hex"] == "11 22 33 44"
     csv_header = (did_dir / "did_catalog.csv").read_text(encoding="utf-8").splitlines()[0]
-    assert csv_header.startswith("did_hex,did_length_bytes,did_message_hex")
+    assert csv_header.startswith("DID,Length,Message DID")
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
