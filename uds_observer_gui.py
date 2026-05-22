@@ -37,6 +37,7 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QScrollArea,
         QSplitter,
         QTableWidget,
         QTableWidgetItem,
@@ -2774,11 +2775,31 @@ class UdsReconGui(QMainWindow):
         self.worker: Optional[RunWorker] = None
 
         self.setWindowTitle(APP_TITLE)
-        self.resize(1440, 860)
-        self.setMinimumSize(1100, 700)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setMinimumSize(980, 640)
+        self.resize(1280, 760)
         self._build_ui()
         self._populate_tests()
         self._select_test(self.registry[0].id)
+        self._fit_to_available_screen()
+
+    def _fit_to_available_screen(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        width = min(1440, max(self.minimumWidth(), int(available.width() * 0.92)))
+        height = min(860, max(self.minimumHeight(), int(available.height() * 0.88)))
+        self.resize(width, height)
+        self.move(
+            available.x() + max(0, (available.width() - width) // 2),
+            available.y() + max(0, (available.height() - height) // 2),
+        )
 
     def _build_ui(self) -> None:
         app = QApplication.instance()
@@ -2790,14 +2811,14 @@ class UdsReconGui(QMainWindow):
         root_layout.setContentsMargins(10, 10, 10, 10)
         self.setCentralWidget(root)
 
-        self.setMinimumSize(1500, 850)
         root_layout.addWidget(self._build_target_profile())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_center_panel())
         splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([380, 620, 720])
+        splitter.setChildrenCollapsible(False)
+        splitter.setSizes([330, 520, 560])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 1)
@@ -2875,7 +2896,7 @@ class UdsReconGui(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(280)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
@@ -2886,11 +2907,11 @@ class UdsReconGui(QMainWindow):
         self.test_dropdown.currentIndexChanged.connect(self._test_dropdown_changed)
         self.description = QTextEdit()
         self.description.setReadOnly(True)
-        self.description.setMinimumHeight(120)
-        self.description.setMaximumHeight(170)
+        self.description.setMinimumHeight(95)
+        self.description.setMaximumHeight(145)
         self.preview = QTextEdit()
         self.preview.setReadOnly(True)
-        self.preview.setMinimumHeight(190)
+        self.preview.setMinimumHeight(150)
         self.run_btn = QPushButton("Run")
         self.run_btn.setObjectName("runButton")
         self.stop_btn = QPushButton("Stop")
@@ -2916,17 +2937,22 @@ class UdsReconGui(QMainWindow):
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(560)
+        panel.setMinimumWidth(420)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 0, 8, 0)
         self.params_group = QGroupBox("Parameters")
-        self.params_group.setMinimumWidth(540)
+        self.params_group.setMinimumWidth(380)
         self.params_layout = QFormLayout(self.params_group)
         self.params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.params_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.params_layout.setHorizontalSpacing(14)
-        self.params_layout.setVerticalSpacing(8)
-        layout.addWidget(self.params_group)
+        self.params_layout.setHorizontalSpacing(10)
+        self.params_layout.setVerticalSpacing(6)
+        self.params_scroll = QScrollArea()
+        self.params_scroll.setWidgetResizable(True)
+        self.params_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.params_scroll.setMinimumHeight(230)
+        self.params_scroll.setWidget(self.params_group)
+        layout.addWidget(self.params_scroll, 3)
         self.did_catalog_box = self._build_did_catalog_box()
         layout.addWidget(self.did_catalog_box)
         layout.addWidget(self._build_summary_card())
@@ -2944,8 +2970,8 @@ class UdsReconGui(QMainWindow):
         layout.addLayout(row)
         self.did_catalog_table = QTableWidget(0, 4)
         self.did_catalog_table.setHorizontalHeaderLabels(["DID", "Name", "Length", "Notes"])
-        self.did_catalog_table.setMinimumHeight(110)
-        self.did_catalog_table.setMaximumHeight(190)
+        self.did_catalog_table.setMinimumHeight(90)
+        self.did_catalog_table.setMaximumHeight(150)
         self.did_catalog_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.did_catalog_table)
         self.load_did_btn.clicked.connect(self._load_did_catalog)
@@ -2975,7 +3001,7 @@ class UdsReconGui(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(620)
+        panel.setMinimumWidth(440)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 0, 0, 0)
         self.live_log = QTextEdit()
@@ -3073,8 +3099,18 @@ class UdsReconGui(QMainWindow):
             widget = QTextEdit()
             widget.setPlaceholderText(spec.placeholder)
             widget.setPlainText(str(spec.default or ""))
-            height = 120 if spec.id in {"session_flow", "custom_request_hex", "precondition_flow", "data_hex"} else 90
+            height_by_field = {
+                "session_flow": 70,
+                "custom_request_hex": 78,
+                "precondition_flow": 82,
+                "preconditions_text": 70,
+                "data_hex": 70,
+                "sensitivity_note": 64,
+                "key_hex": 70,
+            }
+            height = height_by_field.get(spec.id, 70)
             widget.setMinimumHeight(height)
+            widget.setMaximumHeight(max(height + 34, 108))
             widget.textChanged.connect(self._refresh_validation_and_preview)
             return widget
         widget = QLineEdit(str(spec.default or ""))
