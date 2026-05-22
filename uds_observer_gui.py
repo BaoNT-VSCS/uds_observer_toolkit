@@ -122,7 +122,7 @@ def validate_hex_word(text: Any, name: str) -> int:
     return parse_hex_int(text, name=name, maximum=0xFFFF)
 
 
-def parse_hex_payload(text: str, *, name: str = "payload", allow_empty: bool = False) -> bytes:
+def parse_hex_payload(text: str, *, name: str = "payload", allow_empty: bool = False, strict_bytes: bool = False) -> bytes:
     raw = str(text or "").strip()
     if not raw:
         if allow_empty:
@@ -135,7 +135,10 @@ def parse_hex_payload(text: str, *, name: str = "payload", allow_empty: bool = F
         raise ValueError(f"{name} is required")
     out = bytearray()
     for token in tokens:
+        original = token
         token = token[2:] if token.lower().startswith("0x") else token
+        if strict_bytes and len(token) == 1:
+            raise ValueError(f"{name} must contain full bytes, e.g. 0C not {original}")
         if len(token) > 2:
             if len(token) % 2:
                 raise ValueError(f"{name} contains odd-length hex token: {token}")
@@ -160,22 +163,44 @@ def parse_session_flow(text: str) -> list[bytes]:
 
 
 def parse_session_subfunctions(text: str) -> list[int]:
+    """Parse DiagnosticSessionControl subfunction flow.
+
+    The UI field intentionally accepts subfunctions only, not full UDS payloads.
+    Example: "03 02" means the tool sends "10 03" then "10 02".
+    """
     subfunctions: list[int] = []
-    raw = str(text or "").strip()
+    raw = str(text or "").strip().replace("->", " ")
     if not raw:
         return subfunctions
     for line in raw.splitlines():
-        line = line.strip()
+        line = line.strip().replace("->", " ")
         if not line:
             continue
-        payload = parse_hex_payload(line, name="session_flow")
+        payload = parse_hex_payload(line, name="diagnostic_session_flow", strict_bytes=True)
         if payload and payload[0] == 0x10:
-            if len(payload) < 2:
-                raise ValueError("session_flow line starting with 0x10 must include a session subfunction")
-            subfunctions.append(payload[1])
-        else:
-            subfunctions.extend(payload)
+            raise ValueError('Session flow expects subfunctions only. Use "03", not "10 03". The tool automatically adds service 0x10.')
+        subfunctions.extend(payload)
     return subfunctions
+
+
+def expand_session_flow_requests(text: str) -> list[bytes]:
+    return [bytes([0x10, subfn]) for subfn in parse_session_subfunctions(text)]
+
+
+def format_session_flow_preview(text: str) -> str:
+    subfunctions = parse_session_subfunctions(text)
+    if not subfunctions:
+        return "Diagnostic session flow: <none>"
+    compact = " -> ".join(f"{x:02X}" for x in subfunctions)
+    expanded = "; ".join(spaced(req) for req in expand_session_flow_requests(text))
+    return f"Diagnostic session flow: {compact}\nExpanded session requests: {expanded}"
+
+
+def safe_expand_session_flow_hex(text: str) -> list[str]:
+    try:
+        return [spaced(payload) for payload in expand_session_flow_requests(text)]
+    except Exception as exc:
+        return [f"<parse error: {exc}>"]
 
 
 def format_arbid(value: int) -> str:
@@ -493,24 +518,43 @@ def field_enabled(spec: FieldSpec, params: dict[str, Any]) -> bool:
     return spec.enabled_if(params) if spec.enabled_if else True
 
 
+def _parse_length_byte_count(value: Any, name: str) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"{name} is required")
+    try:
+        parsed = int(raw, 0)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a decimal or 0x-prefixed integer") from exc
+    if not 1 <= parsed <= 8:
+        raise ValueError(f"{name} must be between 1 and 8")
+    return parsed
+
+
 def build_memory_request(sid: int, params: dict[str, Any]) -> bytes:
+    mode = str(params.get("request_build_mode") or "structured")
     custom = str(params.get("custom_request_hex") or "").strip()
-    if custom:
-        payload = parse_hex_payload(custom, name="custom_request_hex")
+    if mode == "custom" or (custom and mode not in {"structured", "custom"}):
+        payload = parse_hex_payload(custom, name="custom_request_hex", strict_bytes=True)
         if not payload or payload[0] != sid:
             raise ValueError(f"custom_request_hex must start with 0x{sid:02X}")
         return payload
 
     dfi = validate_hex_byte(params.get("data_format_identifier"), "data_format_identifier")
-    alfi = validate_hex_byte(params.get("address_length_format_identifier"), "address_length_format_identifier")
-    address = parse_hex_payload(params.get("memory_address_hex", ""), name="memory_address_hex")
-    size = parse_hex_payload(params.get("memory_size_hex", ""), name="memory_size_hex")
-    expected_addr_len = (alfi >> 4) & 0x0F
-    expected_size_len = alfi & 0x0F
-    if len(address) != expected_addr_len:
-        raise ValueError(f"ALFI high nibble requires {expected_addr_len} address byte(s), got {len(address)}")
-    if len(size) != expected_size_len:
-        raise ValueError(f"ALFI low nibble requires {expected_size_len} size byte(s), got {len(size)}")
+    if "address_length_bytes" in params or "size_length_bytes" in params:
+        address_len = _parse_length_byte_count(params.get("address_length_bytes"), "address_length_bytes")
+        size_len = _parse_length_byte_count(params.get("size_length_bytes"), "size_length_bytes")
+        alfi = ((size_len & 0x0F) << 4) | (address_len & 0x0F)
+    else:
+        alfi = validate_hex_byte(params.get("address_length_format_identifier"), "address_length_format_identifier")
+        size_len = (alfi >> 4) & 0x0F
+        address_len = alfi & 0x0F
+    address = parse_hex_payload(params.get("memory_address_hex", ""), name="memory_address_hex", strict_bytes=True)
+    size = parse_hex_payload(params.get("memory_size_hex", ""), name="memory_size_hex", strict_bytes=True)
+    if len(address) != address_len:
+        raise ValueError(f"ALFI low nibble requires {address_len} address byte(s), got {len(address)}")
+    if len(size) != size_len:
+        raise ValueError(f"ALFI high nibble requires {size_len} size byte(s), got {len(size)}")
     return bytes([sid, dfi, alfi]) + address + size
 
 
@@ -525,26 +569,40 @@ def build_uds20_request(params: dict[str, Any]) -> bytes:
 
 def build_uds21_request(params: dict[str, Any]) -> bytes:
     did = validate_hex_word(params.get("did_hex"), "did_hex")
-    try:
-        length = int(str(params.get("data_length_bytes") or "").strip(), 10)
-    except ValueError as exc:
-        raise ValueError("data_length_bytes must be a positive decimal integer") from exc
-    if length <= 0:
-        raise ValueError("data_length_bytes must be > 0")
-    data_text = str(params.get("data_hex") or "").strip()
-    if data_text:
-        data = parse_hex_payload(data_text, name="data_hex")
-        if len(data) != length:
-            raise ValueError(f"data_hex length must be {length} byte(s), got {len(data)}")
-    elif params.get("randomize_data"):
+    generation = str(params.get("data_generation") or ("random" if params.get("randomize_data") else "explicit"))
+
+    def parse_length() -> int:
+        try:
+            value = int(str(params.get("data_length_bytes") or "").strip(), 10)
+        except ValueError as exc:
+            raise ValueError("data_length_bytes must be a positive decimal integer") from exc
+        if value <= 0:
+            raise ValueError("data_length_bytes must be a positive decimal integer")
+        return value
+
+    if generation == "explicit":
+        data_text = str(params.get("data_hex") or "").strip()
+        data = parse_hex_payload(data_text, name="data_hex", strict_bytes=True)
+        length_text = str(params.get("data_length_bytes") or "").strip()
+        if length_text:
+            length = parse_length()
+            if len(data) != length:
+                raise ValueError(f"data_hex length must be {length} byte(s), got {len(data)}")
+    elif generation == "random":
+        length = parse_length()
         seed_text = str(params.get("random_seed") or "").strip()
         try:
             rng = random.Random(int(seed_text, 0)) if seed_text else random.SystemRandom()
         except ValueError as exc:
             raise ValueError("random_seed must be an integer when provided") from exc
         data = bytes(rng.randrange(0, 256) for _ in range(length))
+    elif generation == "zero":
+        data = bytes([0x00] * parse_length())
+    elif generation == "pattern":
+        pattern = parse_hex_byte(params.get("pattern_byte", "0xAA"), "pattern_byte")
+        data = bytes([pattern] * parse_length())
     else:
-        raise ValueError("provide data_hex or enable randomize_data")
+        raise ValueError("data_generation must be random, zero, pattern, or explicit")
     return bytes([0x2E, (did >> 8) & 0xFF, did & 0xFF]) + data
 
 
@@ -721,7 +779,7 @@ def validate_common_flows(_: TargetProfile, params: dict[str, Any]) -> dict[str,
     errors: dict[str, str] = {}
     if "session_flow" in params:
         try:
-            parse_session_flow(params.get("session_flow", ""))
+            parse_session_subfunctions(params.get("session_flow", ""))
         except ValueError as exc:
             errors["session_flow"] = str(exc)
     return errors
@@ -736,7 +794,7 @@ def validate_security_access_test(test_id: str) -> Callable[[TargetProfile, dict
             except ValueError as exc:
                 errors["session_flow"] = str(exc)
         elif test_id != "uds_12" or params.get("source_mode") != "import_seed_csv":
-            errors["session_flow"] = "session_flow is required"
+            errors["session_flow"] = "diagnostic_session_flow is required, e.g. 03 or 03 02"
         if "seed_subfn" in params and (test_id != "uds_12" or params.get("source_mode") != "import_seed_csv"):
             try:
                 seed = security_seed_subfn(params)
@@ -838,6 +896,10 @@ def validate_uds21(target: TargetProfile, params: dict[str, Any]) -> dict[str, s
             errors["data_length_bytes"] = message
         elif "random_seed" in message:
             errors["random_seed"] = message
+        elif "pattern_byte" in message:
+            errors["pattern_byte"] = message
+        elif "data_generation" in message:
+            errors["data_generation"] = message
         else:
             errors["data_hex"] = message
     return errors
@@ -855,15 +917,20 @@ def validate_uds22(target: TargetProfile, params: dict[str, Any]) -> dict[str, s
 def validate_memory_request(sid: int) -> Callable[[TargetProfile, dict[str, Any]], dict[str, str]]:
     def _validate(target: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
         errors = validate_common_flows(target, params)
-        if not str(params.get("custom_request_hex") or "").strip():
+        mode = str(params.get("request_build_mode") or "structured")
+        if mode == "custom":
+            if not str(params.get("custom_request_hex") or "").strip():
+                errors["custom_request_hex"] = f"custom_request_hex is required and must start with 0x{sid:02X}"
+        else:
             for key, label in (
                 ("data_format_identifier", "data_format_identifier"),
-                ("address_length_format_identifier", "address_length_format_identifier"),
+                ("address_length_bytes", "address_length_bytes"),
+                ("size_length_bytes", "size_length_bytes"),
                 ("memory_address_hex", "memory_address_hex"),
                 ("memory_size_hex", "memory_size_hex"),
             ):
-                if not str(params.get(key) or "").strip():
-                    errors[key] = f"{label} is required unless custom_request_hex is provided"
+                if key in params and not str(params.get(key) or "").strip():
+                    errors[key] = f"{label} is required in structured mode"
         try:
             build_memory_request(sid, params)
         except ValueError as exc:
@@ -872,14 +939,16 @@ def validate_memory_request(sid: int) -> Callable[[TargetProfile, dict[str, Any]
                 errors["custom_request_hex"] = message
             elif "data_format" in message:
                 errors["data_format_identifier"] = message
-            elif "ALFI" in message or "address_length" in message:
-                errors["address_length_format_identifier"] = message
-            elif "address" in message:
+            elif "address_length_bytes" in message:
+                errors["address_length_bytes"] = message
+            elif "size_length_bytes" in message:
+                errors["size_length_bytes"] = message
+            elif "address" in message or "low nibble" in message:
                 errors["memory_address_hex"] = message
-            elif "size" in message:
+            elif "size" in message or "high nibble" in message:
                 errors["memory_size_hex"] = message
             else:
-                errors["custom_request_hex"] = message
+                errors["custom_request_hex" if mode == "custom" else "memory_address_hex"] = message
         return errors
     return _validate
 
@@ -917,7 +986,7 @@ def validate_subservices(target: TargetProfile, params: dict[str, Any]) -> dict[
             errors["subfunction_range_or_max"] = str(exc)
     if params.get("run_session_flow"):
         try:
-            parse_session_flow(params.get("session_flow", ""))
+            parse_session_subfunctions(params.get("session_flow", ""))
         except ValueError as exc:
             errors["session_flow"] = str(exc)
     return errors
@@ -1327,15 +1396,22 @@ def write_csv_json(evidence_dir: Path, stem: str, rows: list[dict[str, Any]], *,
 
 SESSION_FLOW = FieldSpec(
     "session_flow",
-    "Session flow",
+    "Diagnostic session flow",
     "textarea",
-    "",
+    "03",
     False,
-    "10 03\n27 01\n27 02 AA BB CC DD",
+    "Subfunctions only: 03 or 03 02. Tool sends 10 03 then 10 02.",
 )
 
 
-SESSION_SUBFN_FLOW = FieldSpec("session_flow", "Session subfunctions", "textarea", "03", True, "03 or 03 41 60")
+SESSION_SUBFN_FLOW = FieldSpec(
+    "session_flow",
+    "Diagnostic session flow",
+    "textarea",
+    "03",
+    True,
+    "Subfunctions only: 03 or 03 41 60. Tool adds service 0x10.",
+)
 SEED_SUBFN = FieldSpec("seed_subfn", "RequestSeed subfunction", "text", "0x01", True, "0x01")
 KEY_SUBFN = FieldSpec("key_subfn", "SendKey subfunction", "text", "", False, "default seed_subfn + 1")
 KEY_POLICY_CHOICES = (
@@ -1445,7 +1521,7 @@ def build_registry() -> list[TestDefinition]:
                 FieldSpec("source_mode", "Source mode", "combo", "collect_same_session", True, choices=(
                     Choice("collect_same_session", "collect_same_session"), Choice("collect_cross_session", "collect_cross_session"), Choice("import_seed_csv", "import_seed_csv"),
                 )),
-                FieldSpec("session_flow", "Session subfunctions", "textarea", "03", False, visible_if=lambda p: p.get("source_mode") in {"collect_same_session", "collect_cross_session"}),
+                FieldSpec("session_flow", "Diagnostic session flow", "textarea", "03", False, "Subfunctions only: 03 or 03 02", visible_if=lambda p: p.get("source_mode") in {"collect_same_session", "collect_cross_session"}),
                 FieldSpec("seed_subfn", "RequestSeed subfunction", "text", "0x01", False, visible_if=lambda p: p.get("source_mode") in {"collect_same_session", "collect_cross_session"}),
                 FieldSpec("count", "Sample count", "text", "10", True, visible_if=lambda p: p.get("source_mode") in {"collect_same_session", "collect_cross_session"}),
                 FieldSpec("imported_seed_csv", "Imported seed CSV", "text", "", False, visible_if=lambda p: p.get("source_mode") == "import_seed_csv"),
@@ -1601,11 +1677,11 @@ def build_registry() -> list[TestDefinition]:
                 FieldSpec("run_session_flow", "Run session flow before scan", "checkbox", False),
                 FieldSpec(
                     "session_flow",
-                    "Session flow",
+                    "Diagnostic session flow",
                     "textarea",
-                    "",
+                    "03",
                     False,
-                    "10 03\n27 01\n27 02 AA BB CC DD",
+                    "Subfunctions only: 03 or 03 02. Tool sends 10 03 then 10 02 before scan.",
                     visible_if=lambda p: bool(p.get("run_session_flow")),
                 ),
             ),
@@ -1623,8 +1699,8 @@ def build_registry() -> list[TestDefinition]:
             fields=(
                 FieldSpec("preconditions_known", "Preconditions known", "checkbox", False),
                 FieldSpec("preconditions_text", "Known preconditions", "textarea", "", False, visible_if=lambda p: bool(p.get("preconditions_known"))),
-                FieldSpec("precondition_flow", "Precondition flow", "textarea", "", False, visible_if=lambda p: bool(p.get("preconditions_known"))),
-                FieldSpec("compare_with_precondition_flow", "Also run with precondition flow", "checkbox", False, visible_if=lambda p: bool(p.get("preconditions_known"))),
+                FieldSpec("precondition_flow", "Raw precondition UDS flow", "textarea", "", False, "Full UDS payloads, one per line: 22 F1 90 or 31 01 FF 00", visible_if=lambda p: bool(p.get("preconditions_known"))),
+                FieldSpec("compare_with_precondition_flow", "Also run raw precondition flow", "checkbox", False, visible_if=lambda p: bool(p.get("preconditions_known"))),
                 SESSION_FLOW,
                 FieldSpec(
                     "reset_subfunction",
@@ -1657,10 +1733,16 @@ def build_registry() -> list[TestDefinition]:
             fields=(
                 SESSION_FLOW,
                 FieldSpec("did_hex", "DID", "text", "0xF190", True, "0xF190"),
-                FieldSpec("data_length_bytes", "Data length bytes", "text", "", True),
-                FieldSpec("data_hex", "Data hex", "textarea", "", False, "AA BB CC DD"),
-                FieldSpec("randomize_data", "Randomize data", "checkbox", False),
-                FieldSpec("random_seed", "Random seed", "text", "", False),
+                FieldSpec("data_generation", "Data generation", "combo", "random", True, choices=(
+                    Choice("random bytes", "random"),
+                    Choice("zero bytes", "zero"),
+                    Choice("pattern byte", "pattern"),
+                    Choice("explicit data_hex", "explicit"),
+                )),
+                FieldSpec("data_length_bytes", "Data length bytes", "text", "4", True, visible_if=lambda p: p.get("data_generation") in {"random", "zero", "pattern"}),
+                FieldSpec("pattern_byte", "Pattern byte", "text", "0xAA", False, visible_if=lambda p: p.get("data_generation") == "pattern"),
+                FieldSpec("data_hex", "Data hex", "textarea", "", False, "AA BB CC DD", visible_if=lambda p: p.get("data_generation") == "explicit"),
+                FieldSpec("random_seed", "Random seed", "text", "", False, visible_if=lambda p: p.get("data_generation") == "random"),
             ),
             build_request=build_uds21_request,
             validate=validate_uds21,
@@ -1693,16 +1775,21 @@ def build_registry() -> list[TestDefinition]:
             disruptive=True,
             fields=(
                 SESSION_FLOW,
-                FieldSpec("data_format_identifier", "Data format identifier", "text", "0x00", False),
-                FieldSpec("address_length_format_identifier", "Address/length format", "text", "0x44", False),
-                FieldSpec("memory_address_hex", "Memory address", "text", "", False, "00 00 00 00"),
-                FieldSpec("memory_size_hex", "Memory size", "text", "", False, "00 00 10 00"),
-                FieldSpec("custom_request_hex", "Custom request hex", "textarea", "", False, "34 00 44 00 00 00 00 00 00 10 00"),
+                FieldSpec("request_build_mode", "Request builder", "combo", "structured", True, choices=(
+                    Choice("structured fields", "structured"),
+                    Choice("custom raw request", "custom"),
+                )),
+                FieldSpec("data_format_identifier", "Data format identifier", "text", "0x00", False, visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("address_length_bytes", "Address length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("size_length_bytes", "Size length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("memory_address_hex", "Memory address", "text", "00 00 00 00", True, "00 00 00 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("memory_size_hex", "Memory size", "text", "00 00 10 00", True, "00 00 10 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("custom_request_hex", "Custom request hex", "textarea", "34 00 44 00 00 00 00 00 00 10 00", False, "34 00 44 ...", visible_if=lambda p: p.get("request_build_mode") == "custom"),
             ),
             build_request=lambda p: build_memory_request(0x34, p),
             validate=validate_memory_request(0x34),
             verdict_rules=verdict_download_upload(0x34),
-            evidence_fields=("data_format_identifier", "address_length_format_identifier", "memory_address_hex", "memory_size_hex", "request_hex", "response_hex", "verdict", "rationale"),
+            evidence_fields=("request_build_mode", "data_format_identifier", "address_length_bytes", "size_length_bytes", "memory_address_hex", "memory_size_hex", "custom_request_hex", "request_hex", "response_hex", "verdict", "rationale"),
         ),
         TestDefinition(
             id="uds_24",
@@ -1713,16 +1800,21 @@ def build_registry() -> list[TestDefinition]:
             disruptive=True,
             fields=(
                 SESSION_FLOW,
-                FieldSpec("data_format_identifier", "Data format identifier", "text", "0x00", False),
-                FieldSpec("address_length_format_identifier", "Address/length format", "text", "0x44", False),
-                FieldSpec("memory_address_hex", "Memory address", "text", "", False, "00 00 00 00"),
-                FieldSpec("memory_size_hex", "Memory size", "text", "", False, "00 00 10 00"),
-                FieldSpec("custom_request_hex", "Custom request hex", "textarea", "", False, "35 00 44 00 00 00 00 00 00 10 00"),
+                FieldSpec("request_build_mode", "Request builder", "combo", "structured", True, choices=(
+                    Choice("structured fields", "structured"),
+                    Choice("custom raw request", "custom"),
+                )),
+                FieldSpec("data_format_identifier", "Data format identifier", "text", "0x00", False, visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("address_length_bytes", "Address length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("size_length_bytes", "Size length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("memory_address_hex", "Memory address", "text", "00 00 00 00", True, "00 00 00 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("memory_size_hex", "Memory size", "text", "00 00 10 00", True, "00 00 10 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
+                FieldSpec("custom_request_hex", "Custom request hex", "textarea", "35 00 44 00 00 00 00 00 00 10 00", False, "35 00 44 ...", visible_if=lambda p: p.get("request_build_mode") == "custom"),
             ),
             build_request=lambda p: build_memory_request(0x35, p),
             validate=validate_memory_request(0x35),
             verdict_rules=verdict_download_upload(0x35),
-            evidence_fields=("data_format_identifier", "address_length_format_identifier", "memory_address_hex", "memory_size_hex", "request_hex", "response_hex", "verdict", "rationale"),
+            evidence_fields=("request_build_mode", "data_format_identifier", "address_length_bytes", "size_length_bytes", "memory_address_hex", "memory_size_hex", "custom_request_hex", "request_hex", "response_hex", "verdict", "rationale"),
         ),
         TestDefinition(
             id="uds_25",
@@ -2011,12 +2103,12 @@ class RunWorker(QThread):
             notes.append("This test uses a disruptive UDS service and requires explicit authorization for live execution.")
         if self.target.dry_run:
             notes.append("Dry run was enabled; no CAN request or external command was executed.")
-        if self.params.get("session_flow"):
+        if self.params.get("precondition_flow"):
             try:
-                if flow_contains_security_access(self.params.get("session_flow", "")):
-                    notes.append("Session flow includes SecurityAccess service 0x27 because the user supplied it explicitly.")
+                if flow_contains_security_access(self.params.get("precondition_flow", "")):
+                    notes.append("Raw precondition flow includes SecurityAccess service 0x27 because the user supplied it explicitly.")
             except ValueError:
-                notes.append("Session flow could not be parsed during safety note generation.")
+                notes.append("Raw precondition flow could not be parsed during safety note generation.")
         return notes
 
     def _base_summary(self, evidence: EvidenceWriter) -> dict[str, Any]:
@@ -2031,7 +2123,8 @@ class RunWorker(QThread):
             "command_preview": command_preview_from_argv(command_argv_for(self.test, self.target, self.params)),
             "target_profile": self.target.as_dict(),
             "input_parameters": self.params,
-            "session_flow": self.params.get("session_flow", ""),
+            "diagnostic_session_flow_subfunctions": self.params.get("session_flow", ""),
+            "expanded_session_flow_requests": safe_expand_session_flow_hex(self.params.get("session_flow", "")) if "session_flow" in self.params else [],
             "request_hex": "",
             "response_hex": "",
             "response_type": "",
@@ -2429,7 +2522,7 @@ class RunWorker(QThread):
         return finish(verdict, rationale, metrics)
 
     def _execute_session_flow(self) -> tuple[bool, list[dict[str, Any]]]:
-        flow = parse_session_flow(self.params.get("session_flow", ""))
+        flow = expand_session_flow_requests(self.params.get("session_flow", ""))
         if not flow:
             return True, []
         observations: list[dict[str, Any]] = []
@@ -2467,7 +2560,7 @@ class RunWorker(QThread):
             evidence.add_transcript(f"SAFETY: {note}")
         request = self.test.build_request(self.params)
         client = self._open_uds_client()
-        for payload in parse_session_flow(self.params.get("session_flow", "")):
+        for payload in expand_session_flow_requests(self.params.get("session_flow", "")):
             exchange = self._send_uds(client, payload)
             parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
             obs = self._observation("session_flow", payload, exchange.response, parsed, exchange.error)
@@ -2697,13 +2790,17 @@ class UdsReconGui(QMainWindow):
         root_layout.setContentsMargins(10, 10, 10, 10)
         self.setCentralWidget(root)
 
+        self.setMinimumSize(1500, 850)
         root_layout.addWidget(self._build_target_profile())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_center_panel())
         splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([330, 500, 560])
+        splitter.setSizes([380, 620, 720])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
         root_layout.addWidget(splitter, 1)
 
     def _build_target_profile(self) -> QGroupBox:
@@ -2778,6 +2875,7 @@ class UdsReconGui(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setMinimumWidth(360)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
@@ -2788,10 +2886,11 @@ class UdsReconGui(QMainWindow):
         self.test_dropdown.currentIndexChanged.connect(self._test_dropdown_changed)
         self.description = QTextEdit()
         self.description.setReadOnly(True)
-        self.description.setFixedHeight(130)
+        self.description.setMinimumHeight(120)
+        self.description.setMaximumHeight(170)
         self.preview = QTextEdit()
         self.preview.setReadOnly(True)
-        self.preview.setFixedHeight(170)
+        self.preview.setMinimumHeight(190)
         self.run_btn = QPushButton("Run")
         self.run_btn.setObjectName("runButton")
         self.stop_btn = QPushButton("Stop")
@@ -2817,11 +2916,16 @@ class UdsReconGui(QMainWindow):
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setMinimumWidth(560)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 0, 8, 0)
         self.params_group = QGroupBox("Parameters")
+        self.params_group.setMinimumWidth(540)
         self.params_layout = QFormLayout(self.params_group)
         self.params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.params_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.params_layout.setHorizontalSpacing(14)
+        self.params_layout.setVerticalSpacing(8)
         layout.addWidget(self.params_group)
         self.did_catalog_box = self._build_did_catalog_box()
         layout.addWidget(self.did_catalog_box)
@@ -2840,7 +2944,9 @@ class UdsReconGui(QMainWindow):
         layout.addLayout(row)
         self.did_catalog_table = QTableWidget(0, 4)
         self.did_catalog_table.setHorizontalHeaderLabels(["DID", "Name", "Length", "Notes"])
-        self.did_catalog_table.setMaximumHeight(170)
+        self.did_catalog_table.setMinimumHeight(110)
+        self.did_catalog_table.setMaximumHeight(190)
+        self.did_catalog_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.did_catalog_table)
         self.load_did_btn.clicked.connect(self._load_did_catalog)
         self.use_did_btn.clicked.connect(self._use_selected_did)
@@ -2869,6 +2975,7 @@ class UdsReconGui(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setMinimumWidth(620)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 0, 0, 0)
         self.live_log = QTextEdit()
@@ -2877,6 +2984,8 @@ class UdsReconGui(QMainWindow):
         self.transcript.setReadOnly(True)
         self.parsed_table = QTableWidget(0, 9)
         self.parsed_table.setHorizontalHeaderLabels(["Step", "Request", "Response", "Type", "Positive", "Negative", "NRC", "Meaning", "Note"])
+        self.parsed_table.horizontalHeader().setStretchLastSection(True)
+        self.parsed_table.setMinimumHeight(140)
         layout.addWidget(QLabel("Live log"))
         layout.addWidget(self.live_log, 2)
         layout.addWidget(QLabel("Raw CAN / UDS transcript"))
@@ -2946,6 +3055,7 @@ class UdsReconGui(QMainWindow):
     def _create_field_widget(self, spec: FieldSpec) -> QWidget:
         if spec.kind == "checkbox":
             widget = QCheckBox()
+            widget.setMinimumHeight(26)
             widget.setChecked(bool(spec.default))
             widget.stateChanged.connect(self._refresh_validation_and_preview)
             return widget
@@ -2956,16 +3066,19 @@ class UdsReconGui(QMainWindow):
             index = widget.findData(spec.default)
             if index >= 0:
                 widget.setCurrentIndex(index)
+            widget.setMinimumHeight(28)
             widget.currentIndexChanged.connect(self._refresh_validation_and_preview)
             return widget
         if spec.kind == "textarea":
             widget = QTextEdit()
             widget.setPlaceholderText(spec.placeholder)
             widget.setPlainText(str(spec.default or ""))
-            widget.setFixedHeight(85)
+            height = 120 if spec.id in {"session_flow", "custom_request_hex", "precondition_flow", "data_hex"} else 90
+            widget.setMinimumHeight(height)
             widget.textChanged.connect(self._refresh_validation_and_preview)
             return widget
         widget = QLineEdit(str(spec.default or ""))
+        widget.setMinimumHeight(28)
         widget.setPlaceholderText(spec.placeholder)
         widget.textChanged.connect(self._refresh_validation_and_preview)
         return widget
@@ -3119,6 +3232,16 @@ class UdsReconGui(QMainWindow):
     def _build_preview(self, target: Optional[TargetProfile], params: dict[str, Any], errors: dict[str, str]) -> str:
         if not target:
             return ""
+        lines: list[str] = []
+        if target.dry_run:
+            lines.append("Mode: DRY RUN / no CAN frames will be transmitted")
+        if "session_flow" in params:
+            try:
+                session_preview = format_session_flow_preview(params.get("session_flow", ""))
+                if session_preview:
+                    lines.append(session_preview)
+            except Exception as exc:
+                lines.append(f"Session flow preview error: {exc}")
         preview = ""
         try:
             if self.current_test.runner_kind == "external" and self.current_test.build_command:
@@ -3131,13 +3254,14 @@ class UdsReconGui(QMainWindow):
                 )
             elif self.current_test.build_request:
                 request = self.current_test.build_request(params)
-                preview = f"UDS request: {spaced(request)}"
+                preview = f"Final UDS request: {spaced(request)}"
         except Exception as exc:
             preview = f"Preview error: {exc}"
+        if preview:
+            lines.append(preview)
         if errors:
-            error_text = "Fix validation errors before running:\n" + "\n".join(f"- {msg}" for msg in errors.values())
-            return f"{preview}\n\n{error_text}" if preview else error_text
-        return preview
+            lines.append("Fix validation errors before running:\n" + "\n".join(f"- {msg}" for msg in errors.values()))
+        return "\n\n".join(lines)
 
     def _run_selected(self) -> None:
         self._refresh_validation_and_preview()
@@ -3278,7 +3402,7 @@ def default_params_for_test(test: TestDefinition) -> dict[str, Any]:
     for field_spec in test.fields:
         params[field_spec.id] = field_spec.default
     if test.id == "uds_21":
-        params.update({"data_length_bytes": "4", "data_hex": "AA BB CC DD", "randomize_data": False})
+        params.update({"data_generation": "explicit", "data_length_bytes": "4", "data_hex": "AA BB CC DD", "random_seed": ""})
     if test.id in {"uds_23", "uds_24"}:
         params.update({
             "memory_address_hex": "00 00 10 00",
@@ -3291,39 +3415,45 @@ def default_params_for_test(test: TestDefinition) -> dict[str, Any]:
 def run_self_checks() -> None:
     assert spaced(build_uds21_request({
         "did_hex": "0xF190",
+        "data_generation": "explicit",
         "data_length_bytes": "4",
         "data_hex": "AA BB CC DD",
-        "randomize_data": False,
     })) == "2E F1 90 AA BB CC DD"
     assert len(build_uds21_request({
         "did_hex": "0xF190",
+        "data_generation": "random",
         "data_length_bytes": "4",
-        "data_hex": "",
-        "randomize_data": True,
         "random_seed": "1",
     })[3:]) == 4
     _assert_raises(lambda: build_uds21_request({
         "did_hex": "0xF190",
+        "data_generation": "explicit",
         "data_length_bytes": "4",
         "data_hex": "AA BB",
-        "randomize_data": False,
     }), "data_hex length")
+    _assert_raises(lambda: build_uds21_request({
+        "did_hex": "0xF190",
+        "data_generation": "explicit",
+        "data_hex": "C",
+    }), "full bytes")
 
     assert spaced(build_uds22_request({"did_hex": "0xF190"})) == "22 F1 90"
 
     valid_34 = {
+        "request_build_mode": "structured",
         "data_format_identifier": "0x00",
-        "address_length_format_identifier": "0x44",
+        "address_length_bytes": "4",
+        "size_length_bytes": "4",
         "memory_address_hex": "00 00 10 00",
         "memory_size_hex": "00 00 01 00",
         "custom_request_hex": "",
     }
     assert spaced(build_memory_request(0x34, valid_34)) == "34 00 44 00 00 10 00 00 00 01 00"
-    _assert_raises(lambda: build_memory_request(0x34, {**valid_34, "memory_address_hex": "00 10"}), "ALFI high nibble")
+    _assert_raises(lambda: build_memory_request(0x34, {**valid_34, "memory_address_hex": "00 10"}), "ALFI low nibble")
 
     valid_35 = {**valid_34}
     assert spaced(build_memory_request(0x35, valid_35)) == "35 00 44 00 00 10 00 00 00 01 00"
-    _assert_raises(lambda: build_memory_request(0x35, {**valid_35, "memory_size_hex": "01"}), "ALFI low nibble")
+    _assert_raises(lambda: build_memory_request(0x35, {**valid_35, "memory_size_hex": "01"}), "ALFI high nibble")
 
     assert spaced(build_uds25_request({
         "control_type": "0x03",
