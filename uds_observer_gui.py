@@ -62,6 +62,19 @@ VERDICT_FAIL = "FAIL / FINDING"
 VERDICT_POTENTIAL = "POTENTIAL FINDING"
 VERDICT_INCONCLUSIVE = "INCONCLUSIVE"
 VERDICT_CONFIG = "CONFIG ERROR"
+VERDICT_PASS_SECURITY_GATE = "PASS_SECURITY_GATE"
+VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY = "FAIL_ACCEPTED_WITHOUT_SECURITY"
+VERDICT_INCONCLUSIVE_RANGE_CHECKED_FIRST = "INCONCLUSIVE_RANGE_CHECKED_FIRST"
+VERDICT_INVALID_REQUEST_FORMAT = "INVALID_REQUEST_FORMAT"
+VERDICT_SERVICE_NOT_SUPPORTED = "SERVICE_NOT_SUPPORTED"
+VERDICT_WRONG_SESSION = "WRONG_SESSION"
+VERDICT_PARAMETER_UNSUPPORTED = "PARAMETER_UNSUPPORTED"
+VERDICT_INVALID_TEST_SETUP = "INVALID_TEST_SETUP"
+VERDICT_NEED_MANUAL_REVIEW = "NEED_MANUAL_REVIEW"
+VERDICT_PASS_EXPECTED_DENIAL = "PASS_EXPECTED_DENIAL"
+VERDICT_FAIL_PRECONDITION_BYPASS = "FAIL_PRECONDITION_BYPASS"
+VERDICT_INCONCLUSIVE_NO_RESPONSE = "INCONCLUSIVE_NO_RESPONSE"
+VERDICT_INCONCLUSIVE_SETUP_ERROR = "INCONCLUSIVE_SETUP_ERROR"
 
 NRC_MEANINGS = {
     0x10: "generalReject",
@@ -298,6 +311,18 @@ class UdsExchange:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class ProbeCandidate:
+    request: bytes
+    dfi: int
+    alfi: int
+    address_length: int
+    size_length: int
+    memory_address: bytes
+    memory_size: bytes
+    annotation: str
+
+
 def parse_uds_response(request: bytes, response: Optional[bytes], *, transport_status: str = "") -> UdsParsedResponse:
     if response is None:
         response_type = transport_status or "no_response"
@@ -515,7 +540,7 @@ class TargetProfile:
             "output_directory": str(self.output_dir) if self.save_output else "",
             "save_output": self.save_output,
             "dry_run": self.dry_run,
-            "authorized_disruptive_test": self.authorized_disruptive,
+            "operator_authorization_confirmed": self.authorized_disruptive,
             "disruptive_confirmation_entered": bool(self.disruptive_confirmation.strip()),
             "operator_notes": self.operator_notes,
         }
@@ -586,52 +611,57 @@ def field_enabled(spec: FieldSpec, params: dict[str, Any]) -> bool:
     return spec.enabled_if(params) if spec.enabled_if else True
 
 
-def _parse_length_byte_count(value: Any, name: str) -> int:
-    raw = str(value or "").strip()
-    if not raw:
-        raise ValueError(f"{name} is required")
-    try:
-        parsed = int(raw, 0)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a decimal or 0x-prefixed integer") from exc
-    if not 1 <= parsed <= 8:
-        raise ValueError(f"{name} must be between 1 and 8")
-    return parsed
+def _alfi_lengths(alfi: int) -> tuple[int, int]:
+    return alfi & 0x0F, (alfi >> 4) & 0x0F
 
 
-def build_memory_request(sid: int, params: dict[str, Any]) -> bytes:
-    mode = str(params.get("request_build_mode") or "structured")
-    custom = str(params.get("custom_request_hex") or "").strip()
-    if mode == "custom" or (custom and mode not in {"structured", "custom"}):
-        payload = parse_hex_payload(custom, name="custom_request_hex", strict_bytes=True)
-        if not payload or payload[0] != sid:
-            raise ValueError(f"custom_request_hex must start with 0x{sid:02X}")
-        return payload
+def memory_probe_annotation(service_id: int, alfi: int, address: bytes, size: bytes) -> str:
+    address_len, size_len = _alfi_lengths(alfi)
+    service = "RequestDownload" if service_id == 0x34 else "RequestUpload"
+    return (
+        f"{service} Security Gate Probe; "
+        f"DFI 0x00 = no compression / no encryption; "
+        f"ALFI 0x{alfi:02X} = address length {address_len} bytes, size length {size_len} bytes; "
+        f"address={spaced(address)}; size={spaced(size)}"
+    )
 
-    dfi = validate_hex_byte(params.get("data_format_identifier"), "data_format_identifier")
-    if "address_length_bytes" in params or "size_length_bytes" in params:
-        address_len = _parse_length_byte_count(params.get("address_length_bytes"), "address_length_bytes")
-        size_len = _parse_length_byte_count(params.get("size_length_bytes"), "size_length_bytes")
-        alfi = ((size_len & 0x0F) << 4) | (address_len & 0x0F)
-    else:
-        alfi = validate_hex_byte(params.get("address_length_format_identifier"), "address_length_format_identifier")
-        size_len = (alfi >> 4) & 0x0F
-        address_len = alfi & 0x0F
-    address = parse_hex_payload(params.get("memory_address_hex", ""), name="memory_address_hex", strict_bytes=True)
-    size = parse_hex_payload(params.get("memory_size_hex", ""), name="memory_size_hex", strict_bytes=True)
-    if len(address) != address_len:
-        raise ValueError(f"ALFI low nibble requires {address_len} address byte(s), got {len(address)}")
-    if len(size) != size_len:
-        raise ValueError(f"ALFI high nibble requires {size_len} size byte(s), got {len(size)}")
-    return bytes([sid, dfi, alfi]) + address + size
+
+def build_memory_security_gate_probe_requests(service_id: int) -> list[ProbeCandidate]:
+    if service_id not in {0x34, 0x35}:
+        raise ValueError("memory security gate probe supports only SID 0x34 or 0x35")
+    candidates: list[ProbeCandidate] = []
+    for alfi, address, size in (
+        (0x44, bytes([0x00] * 4), bytes([0x00, 0x00, 0x00, 0x01])),
+        (0x24, bytes([0x00] * 4), bytes([0x00, 0x01])),
+        (0x22, bytes([0x00, 0x00]), bytes([0x00, 0x01])),
+    ):
+        address_len, size_len = _alfi_lengths(alfi)
+        request = bytes([service_id, 0x00, alfi]) + address + size
+        candidates.append(ProbeCandidate(
+            request=request,
+            dfi=0x00,
+            alfi=alfi,
+            address_length=address_len,
+            size_length=size_len,
+            memory_address=address,
+            memory_size=size,
+            annotation=memory_probe_annotation(service_id, alfi, address, size),
+        ))
+    return candidates
+
+
+def format_probe_candidate(candidate: ProbeCandidate) -> str:
+    return f"{spaced(candidate.request)} | {candidate.annotation}"
+
+
+def build_memory_security_gate_probe_request(params: dict[str, Any]) -> bytes:
+    service_id = parse_hex_byte(params.get("target_sid", "0x34"), "target_sid")
+    return build_memory_security_gate_probe_requests(service_id)[0].request
 
 
 def build_uds20_request(params: dict[str, Any]) -> bytes:
     value = params.get("reset_subfunction")
-    if value == "custom":
-        subfn = validate_hex_byte(params.get("reset_subfunction_custom"), "reset_subfunction_custom")
-    else:
-        subfn = validate_hex_byte(value, "reset_subfunction")
+    subfn = validate_hex_byte(value, "reset_subfunction")
     return bytes([0x11, subfn])
 
 
@@ -677,13 +707,18 @@ def build_uds22_request(params: dict[str, Any]) -> bytes:
 
 def build_uds25_request(params: dict[str, Any]) -> bytes:
     value = params.get("control_type")
-    if value == "custom":
-        control_type = validate_hex_byte(params.get("control_type_custom"), "control_type_custom")
-    else:
-        control_type = validate_hex_byte(value, "control_type")
+    control_type = validate_hex_byte(value, "control_type")
     communication_type = validate_hex_byte(params.get("communication_type"), "communication_type")
-    node_id = parse_hex_payload(params.get("node_identification_number", ""), name="node_identification_number", allow_empty=True)
-    return bytes([0x28, control_type, communication_type]) + node_id
+    return build_communication_control_request(control_type, communication_type)
+
+
+def build_communication_control_request(control_type: int, communication_type: int) -> bytes:
+    return bytes([0x28, control_type & 0xFF, communication_type & 0xFF])
+
+
+def build_communication_control_restore_request(params: dict[str, Any]) -> bytes:
+    communication_type = validate_hex_byte(params.get("communication_type"), "communication_type")
+    return build_communication_control_request(0x00, communication_type)
 
 
 def default_key_subfn(seed_subfn: int) -> int:
@@ -846,7 +881,7 @@ def disruptive_confirmation_prompt(test: TestDefinition) -> str:
         "uds_16": "SecurityAccess SendKey 0x27",
         "uds_17": "SecurityAccess SendKey 0x27",
         "uds_18": "SecurityAccess SendKey 0x27",
-        "uds_20": "disruptive service 0x11 ECUReset",
+        "uds_20": "ECUReset 0x11",
         "uds_21": "disruptive service 0x2E WriteDataByIdentifier",
         "uds_23": "disruptive service 0x34 RequestDownload",
         "uds_24": "disruptive service 0x35 RequestUpload",
@@ -948,18 +983,40 @@ def validate_security_access_test(test_id: str) -> Callable[[TargetProfile, dict
     return _validate
 
 
+def parse_acceptable_nrcs(value: Any) -> set[int]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {0x22, 0x24, 0x31, 0x33, 0x7E, 0x7F}
+    raw = raw.replace("[", " ").replace("]", " ")
+    return set(parse_hex_payload(raw, name="acceptable_nrcs", strict_bytes=True))
+
+
 def validate_uds20(target: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
-    errors = validate_common_flows(target, params)
+    errors: dict[str, str] = {}
+    precondition_flow: list[int] = []
+    test_flow: list[int] = []
+    try:
+        precondition_flow = parse_session_subfunctions(params.get("precondition_session_flow", ""))
+    except ValueError as exc:
+        errors["precondition_session_flow"] = str(exc)
+    try:
+        test_flow = parse_session_subfunctions(params.get("test_session_flow", ""))
+    except ValueError as exc:
+        errors["test_session_flow"] = str(exc)
+    if not precondition_flow and "precondition_session_flow" not in errors:
+        errors["precondition_session_flow"] = "Required/precondition session flow is required"
+    if not test_flow and "test_session_flow" not in errors:
+        errors["test_session_flow"] = "Test session flow is required"
+    if precondition_flow and test_flow and precondition_flow == test_flow:
+        errors["test_session_flow"] = "Invalid UDS-20 setup: test_session_flow must differ from precondition_session_flow."
     try:
         build_uds20_request(params)
     except ValueError as exc:
-        field = "reset_subfunction_custom" if params.get("reset_subfunction") == "custom" else "reset_subfunction"
-        errors[field] = str(exc)
-    if params.get("preconditions_known"):
-        try:
-            parse_session_flow(params.get("precondition_flow", ""))
-        except ValueError as exc:
-            errors["precondition_flow"] = str(exc)
+        errors["reset_subfunction"] = str(exc)
+    try:
+        parse_acceptable_nrcs(params.get("acceptable_nrcs"))
+    except ValueError as exc:
+        errors["acceptable_nrcs"] = str(exc)
     return errors
 
 
@@ -991,41 +1048,13 @@ def validate_uds22(target: TargetProfile, params: dict[str, Any]) -> dict[str, s
     return errors
 
 
-def validate_memory_request(sid: int) -> Callable[[TargetProfile, dict[str, Any]], dict[str, str]]:
+def validate_memory_security_gate_probe(sid: int) -> Callable[[TargetProfile, dict[str, Any]], dict[str, str]]:
     def _validate(target: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
         errors = validate_common_flows(target, params)
-        mode = str(params.get("request_build_mode") or "structured")
-        if mode == "custom":
-            if not str(params.get("custom_request_hex") or "").strip():
-                errors["custom_request_hex"] = f"custom_request_hex is required and must start with 0x{sid:02X}"
-        else:
-            for key, label in (
-                ("data_format_identifier", "data_format_identifier"),
-                ("address_length_bytes", "address_length_bytes"),
-                ("size_length_bytes", "size_length_bytes"),
-                ("memory_address_hex", "memory_address_hex"),
-                ("memory_size_hex", "memory_size_hex"),
-            ):
-                if key in params and not str(params.get(key) or "").strip():
-                    errors[key] = f"{label} is required in structured mode"
         try:
-            build_memory_request(sid, params)
+            build_memory_security_gate_probe_requests(sid)
         except ValueError as exc:
-            message = str(exc)
-            if "custom_request_hex" in message:
-                errors["custom_request_hex"] = message
-            elif "data_format" in message:
-                errors["data_format_identifier"] = message
-            elif "address_length_bytes" in message:
-                errors["address_length_bytes"] = message
-            elif "size_length_bytes" in message:
-                errors["size_length_bytes"] = message
-            elif "address" in message or "low nibble" in message:
-                errors["memory_address_hex"] = message
-            elif "size" in message or "high nibble" in message:
-                errors["memory_size_hex"] = message
-            else:
-                errors["custom_request_hex" if mode == "custom" else "memory_address_hex"] = message
+            errors["target_sid"] = str(exc)
         return errors
     return _validate
 
@@ -1036,12 +1065,15 @@ def validate_uds25(target: TargetProfile, params: dict[str, Any]) -> dict[str, s
         build_uds25_request(params)
     except ValueError as exc:
         message = str(exc)
-        if "custom" in message:
-            errors["control_type_custom"] = message
-        elif "communication" in message:
+        if "communication" in message:
             errors["communication_type"] = message
         else:
-            errors["node_identification_number"] = message
+            errors["control_type"] = message
+    if params.get("auto_restore"):
+        try:
+            build_communication_control_restore_request(params)
+        except ValueError as exc:
+            errors["communication_type"] = str(exc)
     return errors
 
 
@@ -1115,8 +1147,6 @@ def verdict_reset(request: bytes, response: Optional[bytes], params: dict[str, A
         return VERDICT_INCONCLUSIVE, parsed.note
     if parsed.positive_response:
         if len(response or b"") >= 2 and response[1] == request[1]:
-            if params.get("require_precondition_for_pass_fail"):
-                return VERDICT_FAIL, "ECU Reset was positively accepted without the declared precondition flow."
             return VERDICT_POTENTIAL, "ECU Reset was accepted without proven preconditions; OEM requirements are unknown."
         return VERDICT_INCONCLUSIVE, "Positive response SID was present but reset subfunction echo was malformed."
     if parsed.negative_response and parsed.nrc in {0x7E, 0x7F}:
@@ -1128,6 +1158,44 @@ def verdict_reset(request: bytes, response: Optional[bytes], params: dict[str, A
     if response is None:
         return VERDICT_INCONCLUSIVE, "No response after reset request; this may be timeout, transport loss, or reset behavior."
     return VERDICT_INCONCLUSIVE, parsed.note
+
+
+def classify_uds20_reset_response(request: bytes, response: Optional[bytes], params: dict[str, Any], transport_status: str = "") -> tuple[str, str, UdsParsedResponse]:
+    parsed = parse_uds_response(request, response, transport_status=transport_status)
+    acceptable_nrcs = parse_acceptable_nrcs(params.get("acceptable_nrcs"))
+    if response is None:
+        return (
+            VERDICT_INCONCLUSIVE_NO_RESPONSE,
+            "No response received. Cannot confirm whether ECU denied the request or reset/communication was disrupted.",
+            parsed,
+        )
+    if parsed.positive_response and response and len(response) >= 2 and response[0] == 0x51 and response[1] == request[1]:
+        return (
+            VERDICT_FAIL_PRECONDITION_BYPASS,
+            "ECU accepted ECUReset outside the required precondition/session.",
+            parsed,
+        )
+    if parsed.negative_response and parsed.nrc in acceptable_nrcs:
+        return (
+            VERDICT_PASS_EXPECTED_DENIAL,
+            "ECUReset was denied when precondition/session was not satisfied.",
+            parsed,
+        )
+    if parsed.negative_response and parsed.nrc == 0x78:
+        return (
+            VERDICT_INCONCLUSIVE_NO_RESPONSE,
+            "ECU returned responsePending but no final decisive response was available.",
+            parsed,
+        )
+    if parsed.malformed:
+        return VERDICT_INCONCLUSIVE, parsed.note, parsed
+    if parsed.negative_response:
+        return (
+            VERDICT_NEED_MANUAL_REVIEW,
+            f"ECUReset was denied with NRC 0x{parsed.nrc:02X} {parsed.nrc_meaning}, which is not in acceptable_nrcs.",
+            parsed,
+        )
+    return VERDICT_NEED_MANUAL_REVIEW, parsed.note, parsed
 
 
 def verdict_wdbi(request: bytes, response: Optional[bytes], params: dict[str, Any], observations: list[dict[str, Any]]) -> tuple[str, str]:
@@ -1171,50 +1239,93 @@ def verdict_rdbi(request: bytes, response: Optional[bytes], params: dict[str, An
     return VERDICT_INCONCLUSIVE, parsed.note
 
 
-def verdict_download_upload(sid: int) -> Callable[[bytes, Optional[bytes], dict[str, Any], list[dict[str, Any]]], tuple[str, str]]:
-    positive_sid = sid + 0x40
-    name = "RequestDownload" if sid == 0x34 else "RequestUpload"
-
-    def _verdict(request: bytes, response: Optional[bytes], params: dict[str, Any], observations: list[dict[str, Any]]) -> tuple[str, str]:
-        parsed = parse_uds_response(request, response)
-        request_was_sent = any(str(obs.get("step", "")).startswith("test_request") for obs in observations)
-        if parsed.malformed:
-            return VERDICT_INCONCLUSIVE, parsed.note
-        if parsed.positive_response and response and response[0] == positive_sid and request_was_sent:
-            return VERDICT_FAIL, f"{name} was initiated without SecurityAccess."
-        if parsed.positive_response:
-            return VERDICT_INCONCLUSIVE, f"Positive {name} response was supplied without evidence that the request was sent by this run."
-        if parsed.negative_response and parsed.nrc == 0x33:
-            return VERDICT_PASS, f"ECU requires SecurityAccess for {name}."
-        if parsed.negative_response and parsed.nrc == 0x22:
-            return VERDICT_PASS, f"ECU rejected {name} because required conditions or preconditions are not satisfied."
-        if parsed.negative_response and parsed.nrc == 0x31:
-            return VERDICT_INCONCLUSIVE, "Memory range may be invalid or unsupported; this does not prove access control."
-        if parsed.negative_response and parsed.nrc == 0x13:
-            return VERDICT_CONFIG, "ECU reported invalid request length or format."
-        if response is None:
-            return VERDICT_INCONCLUSIVE, f"No response to {name} request."
-        return VERDICT_INCONCLUSIVE, parsed.note
-    return _verdict
+def security_access_observed_before_target(observations: list[dict[str, Any]], target_sid: int) -> bool:
+    for obs in observations:
+        request_hex = str(obs.get("request_hex") or "")
+        try:
+            payload = parse_hex_payload(request_hex, name="request_hex", allow_empty=True, strict_bytes=True)
+        except ValueError:
+            continue
+        if not payload:
+            continue
+        if payload[0] == target_sid:
+            return False
+        if payload[0] == 0x27:
+            return True
+    return False
 
 
-def verdict_comm_control(request: bytes, response: Optional[bytes], params: dict[str, Any], observations: list[dict[str, Any]]) -> tuple[str, str]:
-    parsed = parse_uds_response(request, response)
-    if parsed.malformed:
-        return VERDICT_INCONCLUSIVE, parsed.note
-    if parsed.positive_response and response and len(response) >= 2 and response[1] == request[1]:
-        return VERDICT_FAIL, "CommunicationControl was accepted without SecurityAccess."
+def classify_memory_transfer_probe_response(service_id: int, request: bytes, response: Optional[bytes], transport_status: str = "") -> tuple[str, str, bool, UdsParsedResponse]:
+    parsed = parse_uds_response(request, response, transport_status=transport_status)
+    service_name = "RequestDownload" if service_id == 0x34 else "RequestUpload"
+    positive_sid = (service_id + 0x40) & 0xFF
+    if parsed.positive_response and response and response[0] == positive_sid:
+        return (
+            VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY,
+            f"ECU accepted {service_name} negotiation without SecurityAccess.",
+            True,
+            parsed,
+        )
     if parsed.negative_response and parsed.nrc == 0x33:
-        return VERDICT_PASS, "ECU requires SecurityAccess for CommunicationControl."
-    if parsed.negative_response and parsed.nrc == 0x22:
-        return VERDICT_PASS, "ECU rejected CommunicationControl because required conditions or preconditions are not satisfied."
+        return VERDICT_PASS_SECURITY_GATE, f"ECU requires SecurityAccess for {service_name}.", True, parsed
+    if parsed.negative_response and parsed.nrc == 0x31:
+        return (
+            VERDICT_INCONCLUSIVE_RANGE_CHECKED_FIRST,
+            "Request format was processed, but address/size may be out of range; this does not prove SecurityAccess protection.",
+            False,
+            parsed,
+        )
+    if parsed.negative_response and parsed.nrc == 0x13:
+        return VERDICT_INVALID_REQUEST_FORMAT, "Request length or ALFI format is invalid.", False, parsed
+    if parsed.negative_response and parsed.nrc == 0x11:
+        return VERDICT_SERVICE_NOT_SUPPORTED, f"{service_name} is not supported by the ECU.", True, parsed
+    if parsed.negative_response and parsed.nrc == 0x7E:
+        return VERDICT_WRONG_SESSION, f"{service_name} is not supported in the active diagnostic session.", True, parsed
+    if parsed.negative_response and parsed.nrc == 0x7F:
+        return VERDICT_WRONG_SESSION, f"{service_name} is not supported in the active diagnostic session.", True, parsed
+    if response is None or parsed.malformed:
+        return VERDICT_NEED_MANUAL_REVIEW, parsed.note or "No decisive response was received.", True, parsed
+    return VERDICT_NEED_MANUAL_REVIEW, parsed.note, True, parsed
+
+
+def classify_communication_control_response(request: bytes, response: Optional[bytes], transport_status: str = "") -> tuple[str, str, UdsParsedResponse]:
+    parsed = parse_uds_response(request, response, transport_status=transport_status)
+    control_type = request[1] if len(request) > 1 else None
+    if parsed.positive_response and response and len(response) >= 2 and response[0] == 0x68 and response[1] in {0x01, 0x02, 0x03}:
+        return (
+            VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY,
+            "ECU accepted CommunicationControl without SecurityAccess.",
+            parsed,
+        )
+    if parsed.positive_response and response and len(response) >= 2 and control_type is not None and response[1] == control_type:
+        return (
+            VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY,
+            "ECU accepted CommunicationControl without SecurityAccess.",
+            parsed,
+        )
+    if parsed.negative_response and parsed.nrc == 0x33:
+        return VERDICT_PASS_SECURITY_GATE, "ECU requires SecurityAccess for CommunicationControl.", parsed
+    if parsed.negative_response and parsed.nrc == 0x31:
+        return (
+            VERDICT_PARAMETER_UNSUPPORTED,
+            "controlType/communicationType may be unsupported or out of range; this does not prove SecurityAccess protection.",
+            parsed,
+        )
     if parsed.negative_response and parsed.nrc == 0x12:
-        return VERDICT_INCONCLUSIVE, "Control type is unsupported; access control cannot be evaluated."
-    if parsed.negative_response and parsed.nrc in {0x7E, 0x7F}:
-        return "NOT_TESTABLE", f"Service/subfunction is not supported in the active session: {parsed.nrc_meaning}."
-    if response is None:
-        return VERDICT_INCONCLUSIVE, "No response to CommunicationControl request."
-    return VERDICT_INCONCLUSIVE, parsed.note
+        return VERDICT_PARAMETER_UNSUPPORTED, "CommunicationControl subfunction/controlType is not supported.", parsed
+    if parsed.negative_response and parsed.nrc == 0x11:
+        return VERDICT_SERVICE_NOT_SUPPORTED, "CommunicationControl service is not supported.", parsed
+    if parsed.negative_response and parsed.nrc == 0x7E:
+        return VERDICT_WRONG_SESSION, "CommunicationControl is not supported in the active diagnostic session.", parsed
+    if parsed.negative_response and parsed.nrc == 0x7F:
+        return VERDICT_WRONG_SESSION, "CommunicationControl is not supported in the active diagnostic session.", parsed
+    if response is None or parsed.malformed:
+        return (
+            VERDICT_NEED_MANUAL_REVIEW,
+            "No response or malformed response; this may indicate communication impact, timeout, or unsupported request.",
+            parsed,
+        )
+    return VERDICT_NEED_MANUAL_REVIEW, parsed.note, parsed
 
 
 def verdict_seed_sampling(test_id: str, metrics: dict[str, Any]) -> tuple[str, str]:
@@ -1770,35 +1881,29 @@ def build_registry() -> list[TestDefinition]:
             id="uds_20",
             title="UDS-20 Missing Pre-conditions for ECU Reset",
             category="UDS Test Cases",
-            description="Check whether ECU Reset 0x11 is accepted without required preconditions. Does not overclaim when OEM preconditions are unknown.",
+            description="Check whether ECUReset 0x11 is denied when the ECU is placed in a session flow that does not satisfy the required precondition/session.",
             runner_kind="direct",
             disruptive=True,
             fields=(
-                FieldSpec("preconditions_known", "Preconditions known", "checkbox", False),
-                FieldSpec("preconditions_text", "Known preconditions", "textarea", "", False, visible_if=lambda p: bool(p.get("preconditions_known"))),
-                FieldSpec("precondition_flow", "Raw precondition UDS flow", "textarea", "", False, "Full UDS payloads, one per line: 22 F1 90 or 31 01 FF 00", visible_if=lambda p: bool(p.get("preconditions_known"))),
-                FieldSpec("compare_with_precondition_flow", "Also run raw precondition flow", "checkbox", False, visible_if=lambda p: bool(p.get("preconditions_known"))),
-                SESSION_FLOW,
+                FieldSpec("precondition_session_flow", "Required / precondition session flow", "textarea", "03", True, "Reference only. Subfunctions only: 03"),
+                FieldSpec("test_session_flow", "Test session flow", "textarea", "01", True, "Executed before ECUReset. Subfunctions only: 01 or 02"),
                 FieldSpec(
                     "reset_subfunction",
                     "Reset subfunction",
                     "combo",
-                    "0x01",
+                    "0x03",
                     True,
                     choices=(
                         Choice("0x01 hardReset", "0x01"),
                         Choice("0x02 keyOffOnReset", "0x02"),
                         Choice("0x03 softReset", "0x03"),
-                        Choice("custom", "custom"),
                     ),
                 ),
-                FieldSpec("reset_subfunction_custom", "Custom reset subfunction", "text", "0x01", True, visible_if=lambda p: p.get("reset_subfunction") == "custom"),
-                FieldSpec("require_precondition_for_pass_fail", "Require precondition for PASS/FAIL", "checkbox", False),
+                FieldSpec("acceptable_nrcs", "Acceptable NRCs", "text", "0x22 0x24 0x31 0x33 0x7E 0x7F", False, visible_if=lambda p: False),
             ),
             build_request=build_uds20_request,
             validate=validate_uds20,
-            verdict_rules=verdict_reset,
-            evidence_fields=("request_hex", "response_hex", "reset_subfunction", "preconditions_known", "verdict", "rationale"),
+            evidence_fields=("precondition_session_flow", "test_session_flow", "request_hex", "response_hex", "reset_subfunction", "acceptable_nrcs", "verdict", "rationale"),
         ),
         TestDefinition(
             id="uds_21",
@@ -1848,51 +1953,33 @@ def build_registry() -> list[TestDefinition]:
             id="uds_23",
             title="UDS-23 Unauthenticated RequestDownload 0x34",
             category="UDS Test Cases",
-            description="Check whether RequestDownload can be initiated using DFI + ALFI + address + size without SecurityAccess.",
+            description="Security Gate Probe for RequestDownload 0x34. Sends valid-format fixed candidates and verifies whether SecurityAccess is required.",
             runner_kind="direct",
             disruptive=True,
             fields=(
                 SESSION_FLOW,
-                FieldSpec("request_build_mode", "Request builder", "combo", "structured", True, choices=(
-                    Choice("structured fields", "structured"),
-                    Choice("custom raw request", "custom"),
-                )),
-                FieldSpec("data_format_identifier", "Data format identifier", "text", "0x00", False, visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("address_length_bytes", "Address length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("size_length_bytes", "Size length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("memory_address_hex", "Memory address", "text", "00 00 00 00", True, "00 00 00 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("memory_size_hex", "Memory size", "text", "00 00 10 00", True, "00 00 10 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("custom_request_hex", "Custom request hex", "textarea", "34 00 44 00 00 00 00 00 00 10 00", False, "34 00 44 ...", visible_if=lambda p: p.get("request_build_mode") == "custom"),
+                FieldSpec("probe_mode", "Mode", "combo", "security_gate_probe", True, choices=(Choice("Security Gate Probe", "security_gate_probe"),), enabled_if=lambda p: False),
+                FieldSpec("target_sid", "Target SID", "text", "0x34", False, enabled_if=lambda p: False),
             ),
-            build_request=lambda p: build_memory_request(0x34, p),
-            validate=validate_memory_request(0x34),
-            verdict_rules=verdict_download_upload(0x34),
-            evidence_fields=("request_build_mode", "data_format_identifier", "address_length_bytes", "size_length_bytes", "memory_address_hex", "memory_size_hex", "custom_request_hex", "request_hex", "response_hex", "verdict", "rationale"),
+            build_request=build_memory_security_gate_probe_request,
+            validate=validate_memory_security_gate_probe(0x34),
+            evidence_fields=("test_case_id", "target_sid", "session_flow", "security_access_observed_before_target", "request_hex", "response_hex", "parsed_response", "verdict", "rationale", "transfer_data_sent"),
         ),
         TestDefinition(
             id="uds_24",
             title="UDS-24 Unauthenticated RequestUpload 0x35",
             category="UDS Test Cases",
-            description="Check whether RequestUpload can be initiated using DFI + ALFI + address + size without SecurityAccess.",
+            description="Security Gate Probe for RequestUpload 0x35. Sends valid-format fixed candidates and verifies whether SecurityAccess is required.",
             runner_kind="direct",
             disruptive=True,
             fields=(
                 SESSION_FLOW,
-                FieldSpec("request_build_mode", "Request builder", "combo", "structured", True, choices=(
-                    Choice("structured fields", "structured"),
-                    Choice("custom raw request", "custom"),
-                )),
-                FieldSpec("data_format_identifier", "Data format identifier", "text", "0x00", False, visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("address_length_bytes", "Address length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("size_length_bytes", "Size length bytes", "text", "4", True, visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("memory_address_hex", "Memory address", "text", "00 00 00 00", True, "00 00 00 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("memory_size_hex", "Memory size", "text", "00 00 10 00", True, "00 00 10 00", visible_if=lambda p: p.get("request_build_mode") == "structured"),
-                FieldSpec("custom_request_hex", "Custom request hex", "textarea", "35 00 44 00 00 00 00 00 00 10 00", False, "35 00 44 ...", visible_if=lambda p: p.get("request_build_mode") == "custom"),
+                FieldSpec("probe_mode", "Mode", "combo", "security_gate_probe", True, choices=(Choice("Security Gate Probe", "security_gate_probe"),), enabled_if=lambda p: False),
+                FieldSpec("target_sid", "Target SID", "text", "0x35", False, enabled_if=lambda p: False),
             ),
-            build_request=lambda p: build_memory_request(0x35, p),
-            validate=validate_memory_request(0x35),
-            verdict_rules=verdict_download_upload(0x35),
-            evidence_fields=("request_build_mode", "data_format_identifier", "address_length_bytes", "size_length_bytes", "memory_address_hex", "memory_size_hex", "custom_request_hex", "request_hex", "response_hex", "verdict", "rationale"),
+            build_request=build_memory_security_gate_probe_request,
+            validate=validate_memory_security_gate_probe(0x35),
+            evidence_fields=("test_case_id", "target_sid", "session_flow", "security_access_observed_before_target", "request_hex", "response_hex", "parsed_response", "verdict", "rationale", "transfer_data_sent"),
         ),
         TestDefinition(
             id="uds_25",
@@ -1907,24 +1994,20 @@ def build_registry() -> list[TestDefinition]:
                     "control_type",
                     "Control type",
                     "combo",
-                    "0x00",
+                    "0x01",
                     True,
                     choices=(
-                        Choice("0x00 enableRxAndTx", "0x00"),
                         Choice("0x01 enableRxAndDisableTx", "0x01"),
                         Choice("0x02 disableRxAndEnableTx", "0x02"),
                         Choice("0x03 disableRxAndTx", "0x03"),
-                        Choice("custom", "custom"),
                     ),
                 ),
-                FieldSpec("control_type_custom", "Custom control type", "text", "0x00", True, visible_if=lambda p: p.get("control_type") == "custom"),
                 FieldSpec("communication_type", "Communication type", "text", "0x01", True),
-                FieldSpec("node_identification_number", "Node identification number", "text", "", False),
+                FieldSpec("auto_restore", "Auto restore 28 00 01", "checkbox", True),
             ),
             build_request=build_uds25_request,
             validate=validate_uds25,
-            verdict_rules=verdict_comm_control,
-            evidence_fields=("control_type", "communication_type", "node_identification_number", "request_hex", "response_hex", "verdict", "rationale"),
+            evidence_fields=("test_case_id", "target_sid", "session_flow", "security_access_observed_before_target", "request_hex", "response_hex", "restore_request_hex", "restore_response_hex", "post_check_result", "verdict", "rationale"),
         ),
     ]
 
@@ -2192,12 +2275,6 @@ class RunWorker(QThread):
             notes.append("This test uses a disruptive UDS service and requires explicit authorization for live execution.")
         if self.target.dry_run:
             notes.append("Dry run was enabled; no CAN request or external command was executed.")
-        if self.params.get("precondition_flow"):
-            try:
-                if flow_contains_security_access(self.params.get("precondition_flow", "")):
-                    notes.append("Raw precondition flow includes SecurityAccess service 0x27 because the user supplied it explicitly.")
-            except ValueError:
-                notes.append("Raw precondition flow could not be parsed during safety note generation.")
         return notes
 
     def _base_summary(self, evidence: EvidenceWriter) -> dict[str, Any]:
@@ -2258,6 +2335,38 @@ class RunWorker(QThread):
                 summary["seed_length_report"] = []
             if self.test.id == "uds_15":
                 summary["requestseed_limit"] = []
+        elif self.test.id in {"uds_23", "uds_24"}:
+            service_id = 0x34 if self.test.id == "uds_23" else 0x35
+            candidates = build_memory_security_gate_probe_requests(service_id)
+            summary["execution_steps"] = [{"step": "session_flow", "request_hex": req} for req in safe_expand_session_flow_hex(self.params.get("session_flow", ""))]
+            summary["execution_steps"].extend({
+                "step": f"security_gate_probe_candidate_{idx + 1}",
+                "request_hex": spaced(candidate.request),
+                "annotation": candidate.annotation,
+            } for idx, candidate in enumerate(candidates))
+            summary["request_hex"] = spaced(candidates[0].request)
+            summary["test_case_id"] = self.test.id
+            summary["target_sid"] = f"0x{service_id:02X}"
+            summary["parsed_response"] = {}
+            summary["security_access_observed_before_target"] = False
+            summary["security_access_absence_statement"] = "No SecurityAccess seed/key exchange was performed before the tested request."
+            summary["transfer_data_sent"] = False
+            summary["transfer_data_statement"] = "TransferData 0x36 was not sent."
+        elif self.test.id == "uds_25":
+            request = build_uds25_request(self.params)
+            restore = build_communication_control_restore_request(self.params)
+            summary["execution_steps"] = [{"step": "session_flow", "request_hex": req} for req in safe_expand_session_flow_hex(self.params.get("session_flow", ""))]
+            summary["execution_steps"].append({"step": "communication_control_target", "request_hex": spaced(request)})
+            if self.params.get("auto_restore", True):
+                summary["execution_steps"].append({"step": "communication_control_restore", "request_hex": spaced(restore)})
+            summary["request_hex"] = spaced(request)
+            summary["test_case_id"] = self.test.id
+            summary["restore_request_hex"] = spaced(restore)
+            summary["target_sid"] = "0x28"
+            summary["parsed_response"] = {}
+            summary["security_access_observed_before_target"] = False
+            summary["security_access_absence_statement"] = "No SecurityAccess seed/key exchange was performed before the tested request."
+            summary["post_check_result"] = "dry_run_not_executed"
         elif self.test.build_request:
             request = self.test.build_request(self.params)
             summary["request_hex"] = spaced(request)
@@ -2642,7 +2751,292 @@ class RunWorker(QThread):
             time.sleep(self.target.delay)
         return True, observations
 
+    def _run_session_flow_for_direct_test(self, client: Any, evidence: EvidenceWriter, observations: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        for payload in expand_session_flow_requests(self.params.get("session_flow", "")):
+            exchange = self._send_uds(client, payload)
+            parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
+            obs = self._observation("session_flow", payload, exchange.response, parsed, exchange.error)
+            observations.append(obs)
+            self.parsed_row.emit(obs)
+            evidence.add_transcript(f"SESSION TX {spaced(payload)}")
+            evidence.add_transcript(f"SESSION RX {spaced(exchange.response) if exchange.response else '<no response>'} [{parsed.response_type}]")
+            if not parsed.positive_response:
+                summary = self._base_summary(evidence)
+                summary["observations"] = observations
+                summary["verdict"] = VERDICT_INCONCLUSIVE
+                summary["rationale"] = "Session flow did not complete positively; test request was not sent."
+                return summary
+            time.sleep(self.target.delay)
+        return None
+
+    def _invalid_security_setup_summary(self, evidence: EvidenceWriter, observations: list[dict[str, Any]], target_sid: int) -> dict[str, Any]:
+        summary = self._base_summary(evidence)
+        if target_sid in {0x34, 0x35}:
+            intended_request = build_memory_security_gate_probe_requests(target_sid)[0].request
+        elif target_sid == 0x28:
+            intended_request = build_uds25_request(self.params)
+        else:
+            intended_request = b""
+        extra: dict[str, Any] = {}
+        if target_sid in {0x34, 0x35}:
+            extra.update({
+                "transfer_data_sent": False,
+                "transfer_data_statement": "TransferData 0x36 was not sent.",
+            })
+        if target_sid == 0x28:
+            extra.update({
+                "restore_request_hex": spaced(build_communication_control_restore_request(self.params)),
+                "restore_response_hex": "",
+                "post_check_result": "not_executed_invalid_setup",
+            })
+        summary.update({
+            "test_case_id": self.test.id,
+            "target_sid": f"0x{target_sid:02X}",
+            "request_hex": spaced(intended_request),
+            "response_hex": "",
+            "parsed_response": {},
+            "security_access_observed_before_target": True,
+            "security_access_absence_statement": "SecurityAccess 0x27 was observed before the tested request; unauthenticated test aborted.",
+            "verdict": VERDICT_INVALID_TEST_SETUP,
+            "rationale": "A TX request starting with 0x27 occurred before the target service request.",
+            "observations": observations,
+        })
+        summary.update(extra)
+        return summary
+
+    def _memory_security_gate_evidence(self, candidate: ProbeCandidate) -> dict[str, Any]:
+        return {
+            "dfi": f"0x{candidate.dfi:02X}",
+            "dfi_annotation": "DFI 0x00 = no compression / no encryption",
+            "alfi": f"0x{candidate.alfi:02X}",
+            "alfi_annotation": f"ALFI 0x{candidate.alfi:02X} = address length {candidate.address_length} bytes, size length {candidate.size_length} bytes",
+            "address_length": candidate.address_length,
+            "size_length": candidate.size_length,
+            "memory_address": spaced(candidate.memory_address),
+            "memory_size": spaced(candidate.memory_size),
+            "annotation": candidate.annotation,
+        }
+
+    def _run_memory_security_gate_probe(self, evidence: EvidenceWriter, service_id: int) -> dict[str, Any]:
+        observations: list[dict[str, Any]] = []
+        for note in self._safety_notes():
+            self.log_line.emit(f"Safety note: {note}")
+            evidence.add_transcript(f"SAFETY: {note}")
+        evidence.add_transcript("ASSERTION No SecurityAccess seed/key exchange was performed before the tested request.")
+        client = self._open_uds_client()
+        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations)
+        if session_failure:
+            session_failure.update({
+                "test_case_id": self.test.id,
+                "target_sid": f"0x{service_id:02X}",
+                "request_hex": spaced(build_memory_security_gate_probe_requests(service_id)[0].request),
+                "parsed_response": {},
+                "security_access_observed_before_target": security_access_observed_before_target(observations, service_id),
+                "security_access_absence_statement": "No SecurityAccess seed/key exchange was performed before the tested request.",
+                "transfer_data_sent": False,
+                "transfer_data_statement": "TransferData 0x36 was not sent.",
+            })
+            return session_failure
+        if security_access_observed_before_target(observations, service_id):
+            return self._invalid_security_setup_summary(evidence, observations, service_id)
+
+        verdict = VERDICT_NEED_MANUAL_REVIEW
+        rationale = "No probe candidate produced a decisive response."
+        response: Optional[bytes] = None
+        parsed: Optional[UdsParsedResponse] = None
+        final_candidate = build_memory_security_gate_probe_requests(service_id)[0]
+        decisive = False
+        for idx, candidate in enumerate(build_memory_security_gate_probe_requests(service_id), 1):
+            self.log_line.emit(f"Memory security gate candidate {idx}: {format_probe_candidate(candidate)}")
+            evidence.add_transcript(f"CANDIDATE {idx} {format_probe_candidate(candidate)}")
+            exchange = self._send_uds(client, candidate.request)
+            response = exchange.response
+            verdict, rationale, decisive, parsed = classify_memory_transfer_probe_response(
+                service_id,
+                candidate.request,
+                response,
+                exchange.response_type,
+            )
+            obs = self._observation(f"security_gate_probe_candidate_{idx}", candidate.request, response, parsed, exchange.error)
+            obs.update(self._memory_security_gate_evidence(candidate))
+            observations.append(obs)
+            self.parsed_row.emit(obs)
+            evidence.add_transcript(f"TEST TX {spaced(candidate.request)}")
+            evidence.add_transcript(f"TEST RX {spaced(response) if response else '<no response>'} [{parsed.response_type}]")
+            final_candidate = candidate
+            if decisive:
+                break
+            time.sleep(self.target.delay)
+
+        assert parsed is not None
+        summary = self._base_summary(evidence)
+        summary.update({
+            "test_case_id": self.test.id,
+            "target_sid": f"0x{service_id:02X}",
+            "request_hex": spaced(final_candidate.request),
+            "response_hex": spaced(response) if response else "",
+            "response_type": parsed.response_type,
+            "positive_response": parsed.positive_response,
+            "negative_response": parsed.negative_response,
+            "nrc": f"0x{parsed.nrc:02X}" if parsed.nrc is not None else "",
+            "nrc_meaning": parsed.nrc_meaning,
+            "parsed_sid": f"0x{response[0]:02X}" if response else "",
+            "parsed_response": parsed.__dict__,
+            "verdict": verdict,
+            "rationale": rationale,
+            "observations": observations,
+            "security_access_observed_before_target": False,
+            "security_access_absence_statement": "No SecurityAccess seed/key exchange was performed before the tested request.",
+            "transfer_data_sent": False,
+            "transfer_data_statement": "TransferData 0x36 was not sent.",
+            "request_transfer_exit_sent": False,
+            "candidate_requests": [format_probe_candidate(candidate) for candidate in build_memory_security_gate_probe_requests(service_id)],
+        })
+        summary.update(self._memory_security_gate_evidence(final_candidate))
+        return summary
+
+    def _run_communication_control_security_gate(self, evidence: EvidenceWriter) -> dict[str, Any]:
+        observations: list[dict[str, Any]] = []
+        for note in self._safety_notes():
+            self.log_line.emit(f"Safety note: {note}")
+            evidence.add_transcript(f"SAFETY: {note}")
+        evidence.add_transcript("ASSERTION No SecurityAccess seed/key exchange was performed before the tested request.")
+        client = self._open_uds_client()
+        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations)
+        if session_failure:
+            session_failure.update({
+                "test_case_id": self.test.id,
+                "target_sid": "0x28",
+                "request_hex": spaced(build_uds25_request(self.params)),
+                "parsed_response": {},
+                "security_access_observed_before_target": security_access_observed_before_target(observations, 0x28),
+                "security_access_absence_statement": "No SecurityAccess seed/key exchange was performed before the tested request.",
+                "restore_request_hex": spaced(build_communication_control_restore_request(self.params)),
+                "restore_response_hex": "",
+                "post_check_result": "not_executed_session_flow_failed",
+            })
+            return session_failure
+        if security_access_observed_before_target(observations, 0x28):
+            return self._invalid_security_setup_summary(evidence, observations, 0x28)
+
+        request = build_uds25_request(self.params)
+        exchange = self._send_uds(client, request)
+        response = exchange.response
+        verdict, rationale, parsed = classify_communication_control_response(request, response, exchange.response_type)
+        obs = self._observation("communication_control_target", request, response, parsed, exchange.error)
+        observations.append(obs)
+        self.parsed_row.emit(obs)
+        evidence.add_transcript(f"TEST TX {spaced(request)}")
+        evidence.add_transcript(f"TEST RX {spaced(response) if response else '<no response>'} [{parsed.response_type}]")
+
+        restore_request = build_communication_control_restore_request(self.params)
+        restore_response: Optional[bytes] = None
+        restore_parsed: Optional[UdsParsedResponse] = None
+        restore_status = "not_executed"
+        post_check_result = "not_configured"
+        if self.params.get("auto_restore", True):
+            restore_exchange = self._send_uds(client, restore_request)
+            restore_response = restore_exchange.response
+            restore_parsed = parse_uds_response(restore_request, restore_response, transport_status=restore_exchange.response_type)
+            restore_obs = self._observation("communication_control_restore", restore_request, restore_response, restore_parsed, restore_exchange.error)
+            observations.append(restore_obs)
+            self.parsed_row.emit(restore_obs)
+            evidence.add_transcript(f"RESTORE TX {spaced(restore_request)}")
+            evidence.add_transcript(f"RESTORE RX {spaced(restore_response) if restore_response else '<no response>'} [{restore_parsed.response_type}]")
+            restore_status = restore_parsed.response_type
+            post_check_result = "restore_positive" if restore_parsed.positive_response else f"restore_{restore_parsed.response_type}"
+
+        summary = self._base_summary(evidence)
+        summary.update({
+            "test_case_id": self.test.id,
+            "target_sid": "0x28",
+            "request_hex": spaced(request),
+            "response_hex": spaced(response) if response else "",
+            "response_type": parsed.response_type,
+            "positive_response": parsed.positive_response,
+            "negative_response": parsed.negative_response,
+            "nrc": f"0x{parsed.nrc:02X}" if parsed.nrc is not None else "",
+            "nrc_meaning": parsed.nrc_meaning,
+            "parsed_sid": f"0x{response[0]:02X}" if response else "",
+            "parsed_response": parsed.__dict__,
+            "verdict": verdict,
+            "rationale": rationale,
+            "observations": observations,
+            "security_access_observed_before_target": False,
+            "security_access_absence_statement": "No SecurityAccess seed/key exchange was performed before the tested request.",
+            "restore_request_hex": spaced(restore_request),
+            "restore_response_hex": spaced(restore_response) if restore_response else "",
+            "restore_response_type": restore_status,
+            "restore_parsed_response": restore_parsed.__dict__ if restore_parsed else {},
+            "post_check_result": post_check_result,
+        })
+        return summary
+
+    def _run_uds20_reset_precondition_probe(self, evidence: EvidenceWriter) -> dict[str, Any]:
+        observations: list[dict[str, Any]] = []
+        for note in self._safety_notes():
+            self.log_line.emit(f"Safety note: {note}")
+            evidence.add_transcript(f"SAFETY: {note}")
+        request = build_uds20_request(self.params)
+        client = self._open_uds_client()
+        for payload in expand_session_flow_requests(self.params.get("test_session_flow", "")):
+            exchange = self._send_uds(client, payload)
+            parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
+            obs = self._observation("test_session_flow", payload, exchange.response, parsed, exchange.error)
+            observations.append(obs)
+            self.parsed_row.emit(obs)
+            evidence.add_transcript(f"TEST_SESSION TX {spaced(payload)}")
+            evidence.add_transcript(f"TEST_SESSION RX {spaced(exchange.response) if exchange.response else '<no response>'} [{parsed.response_type}]")
+            if not parsed.positive_response:
+                summary = self._base_summary(evidence)
+                summary.update({
+                    "precondition_session_flow": self.params.get("precondition_session_flow", ""),
+                    "test_session_flow": self.params.get("test_session_flow", ""),
+                    "expanded_test_session_requests": safe_expand_session_flow_hex(self.params.get("test_session_flow", "")),
+                    "request_hex": spaced(request),
+                    "verdict": VERDICT_INCONCLUSIVE_SETUP_ERROR,
+                    "rationale": "Could not enter the configured test session flow before sending ECUReset.",
+                    "observations": observations,
+                })
+                return summary
+            time.sleep(self.target.delay)
+
+        exchange = self._send_uds(client, request)
+        response = exchange.response
+        verdict, rationale, parsed = classify_uds20_reset_response(request, response, self.params, exchange.response_type)
+        obs = self._observation("ecu_reset_without_required_precondition", request, response, parsed, exchange.error)
+        observations.append(obs)
+        self.parsed_row.emit(obs)
+        evidence.add_transcript(f"TEST TX {spaced(request)}")
+        evidence.add_transcript(f"TEST RX {spaced(response) if response else '<no response>'} [{parsed.response_type}]")
+
+        summary = self._base_summary(evidence)
+        summary.update({
+            "precondition_session_flow": self.params.get("precondition_session_flow", ""),
+            "test_session_flow": self.params.get("test_session_flow", ""),
+            "expanded_test_session_requests": safe_expand_session_flow_hex(self.params.get("test_session_flow", "")),
+            "request_hex": spaced(request),
+            "response_hex": spaced(response) if response else "",
+            "response_type": parsed.response_type,
+            "positive_response": parsed.positive_response,
+            "negative_response": parsed.negative_response,
+            "nrc": f"0x{parsed.nrc:02X}" if parsed.nrc is not None else "",
+            "nrc_meaning": parsed.nrc_meaning,
+            "reset_subfunction": f"0x{request[1]:02X}" if len(request) > 1 else "",
+            "acceptable_nrcs": [f"0x{x:02X}" for x in sorted(parse_acceptable_nrcs(self.params.get("acceptable_nrcs")))],
+            "verdict": verdict,
+            "rationale": rationale,
+            "observations": observations,
+        })
+        return summary
+
     def _run_direct(self, evidence: EvidenceWriter) -> dict[str, Any]:
+        if self.test.id == "uds_20":
+            return self._run_uds20_reset_precondition_probe(evidence)
+        if self.test.id in {"uds_23", "uds_24"}:
+            return self._run_memory_security_gate_probe(evidence, 0x34 if self.test.id == "uds_23" else 0x35)
+        if self.test.id == "uds_25":
+            return self._run_communication_control_security_gate(evidence)
         if not self.test.build_request or not self.test.verdict_rules:
             return self._error_summary(evidence, VERDICT_CONFIG, "Direct runner is missing request or verdict logic.")
 
@@ -2671,27 +3065,10 @@ class RunWorker(QThread):
         exchange = self._send_uds(client, request)
         response = exchange.response
         parsed = parse_uds_response(request, response, transport_status=exchange.response_type)
-        observations.append(self._observation("test_request_without_precondition_flow", request, response, parsed, exchange.error))
+        observations.append(self._observation("test_request", request, response, parsed, exchange.error))
         self.parsed_row.emit(observations[-1])
         evidence.add_transcript(f"TEST TX {spaced(request)}")
         evidence.add_transcript(f"TEST RX {spaced(response) if response else '<no response>'} [{parsed.response_type}]")
-
-        if self.test.id == "uds_20" and self.params.get("preconditions_known") and self.params.get("compare_with_precondition_flow"):
-            for payload in parse_session_flow(self.params.get("precondition_flow", "")):
-                flow_exchange = self._send_uds(client, payload)
-                flow_response = flow_exchange.response
-                flow_parsed = parse_uds_response(payload, flow_response, transport_status=flow_exchange.response_type)
-                observations.append(self._observation("precondition_flow", payload, flow_response, flow_parsed, flow_exchange.error))
-                self.parsed_row.emit(observations[-1])
-                time.sleep(self.target.delay)
-                if not flow_parsed.positive_response:
-                    break
-            else:
-                second_exchange = self._send_uds(client, request)
-                second_response = second_exchange.response
-                second_parsed = parse_uds_response(request, second_response, transport_status=second_exchange.response_type)
-                observations.append(self._observation("test_request_with_precondition_flow", request, second_response, second_parsed, second_exchange.error))
-                self.parsed_row.emit(observations[-1])
 
         verdict, rationale = self.test.verdict_rules(request, response, self.params, observations)
         summary = self._base_summary(evidence)
@@ -2951,7 +3328,7 @@ class UdsReconGui(QMainWindow):
         self.dry_run = QCheckBox("Dry run")
         self.dry_run.setChecked(False)
         self.dry_run.setVisible(False)
-        self.authorized_disruptive = QCheckBox("Authorized test")
+        self.authorized_disruptive = QCheckBox("Operator authorization confirmed")
         self.authorized_disruptive.setChecked(False)
         self.authorized_disruptive.setVisible(False)
         self.tester_tx_label = QLabel("tester_tx_id")
@@ -3195,9 +3572,8 @@ class UdsReconGui(QMainWindow):
             widget.setPlainText(str(spec.default or ""))
             height_by_field = {
                 "session_flow": 70,
-                "custom_request_hex": 78,
-                "precondition_flow": 82,
-                "preconditions_text": 70,
+                "precondition_session_flow": 70,
+                "test_session_flow": 70,
                 "data_hex": 70,
                 "sensitivity_note": 64,
                 "did_message_hex": 64,
@@ -3364,7 +3740,18 @@ class UdsReconGui(QMainWindow):
                 lines.append(f"Session flow preview error: {exc}")
         preview = ""
         try:
-            if self.current_test.runner_kind == "external" and self.current_test.build_command:
+            if self.current_test.id == "uds_20":
+                request = build_uds20_request(params)
+                expected = " / ".join(f"7F 11 {nrc:02X}" for nrc in sorted(parse_acceptable_nrcs(params.get("acceptable_nrcs"))))
+                expanded_test = "; ".join(spaced(payload) for payload in expand_session_flow_requests(params.get("test_session_flow", "")))
+                preview = "\n".join([
+                    f"Required/precondition session flow: {str(params.get('precondition_session_flow') or '').strip()}",
+                    f"Actual test session flow: {str(params.get('test_session_flow') or '').strip()}",
+                    f"Expanded test session requests: {expanded_test}",
+                    f"Final UDS request: {spaced(request)}",
+                    f"Expected denial: {expected}",
+                ])
+            elif self.current_test.runner_kind == "external" and self.current_test.build_command:
                 preview = command_preview_from_argv(command_argv_for(self.current_test, target, params))
             elif self.current_test.runner_kind == "security_access" and self.current_test.execution_plan:
                 plan = self.current_test.execution_plan(params)
@@ -3372,6 +3759,16 @@ class UdsReconGui(QMainWindow):
                     f"{idx + 1:02d}. {step.get('step')} {step.get('request_hex', '') or ('wait=' + str(step.get('wait_seconds')) + 's' if step.get('wait_seconds') is not None else '')}"
                     for idx, step in enumerate(plan)
                 )
+            elif self.current_test.id in {"uds_23", "uds_24"}:
+                service_id = 0x34 if self.current_test.id == "uds_23" else 0x35
+                preview = "\n".join(
+                    ["Security Gate Probe candidates. TransferData 0x36 will not be sent."]
+                    + [f"{idx + 1:02d}. {format_probe_candidate(candidate)}" for idx, candidate in enumerate(build_memory_security_gate_probe_requests(service_id))]
+                )
+            elif self.current_test.id == "uds_25":
+                request = build_uds25_request(params)
+                restore = build_communication_control_restore_request(params)
+                preview = f"Target request: {spaced(request)}\nRestore request: {spaced(restore)}"
             elif self.current_test.build_request:
                 request = self.current_test.build_request(params)
                 preview = f"Final UDS request: {spaced(request)}"
@@ -3393,8 +3790,9 @@ class UdsReconGui(QMainWindow):
             disruptive_confirmation_prompt(self.current_test),
         )
         if not ok or entered.strip() != required_token:
-            self._append_log("Blocked: destructive confirmation failed.")
-            QMessageBox.warning(self, "Execution blocked", "Blocked: destructive confirmation failed.")
+            message = "Blocked: destructive ECUReset confirmation failed." if self.current_test.id == "uds_20" else "Blocked: destructive confirmation failed."
+            self._append_log(message)
+            QMessageBox.warning(self, "Execution blocked", message)
             return None
         return replace(target, authorized_disruptive=True, disruptive_confirmation=required_token)
 
@@ -3572,12 +3970,6 @@ def default_params_for_test(test: TestDefinition) -> dict[str, Any]:
         params[field_spec.id] = field_spec.default
     if test.id == "uds_21":
         params.update({"data_generation": "explicit", "data_length_bytes": "4", "data_hex": "AA BB CC DD"})
-    if test.id in {"uds_23", "uds_24"}:
-        params.update({
-            "memory_address_hex": "00 00 10 00",
-            "memory_size_hex": "00 00 01 00",
-            "custom_request_hex": "",
-        })
     return params
 
 
@@ -3608,27 +4000,25 @@ def run_self_checks() -> None:
 
     assert spaced(build_uds22_request({"did_hex": "0xF190"})) == "22 F1 90"
 
-    valid_34 = {
-        "request_build_mode": "structured",
-        "data_format_identifier": "0x00",
-        "address_length_bytes": "4",
-        "size_length_bytes": "4",
-        "memory_address_hex": "00 00 10 00",
-        "memory_size_hex": "00 00 01 00",
-        "custom_request_hex": "",
-    }
-    assert spaced(build_memory_request(0x34, valid_34)) == "34 00 44 00 00 10 00 00 00 01 00"
-    _assert_raises(lambda: build_memory_request(0x34, {**valid_34, "memory_address_hex": "00 10"}), "ALFI low nibble")
-
-    valid_35 = {**valid_34}
-    assert spaced(build_memory_request(0x35, valid_35)) == "35 00 44 00 00 10 00 00 00 01 00"
-    _assert_raises(lambda: build_memory_request(0x35, {**valid_35, "memory_size_hex": "01"}), "ALFI high nibble")
+    uds23_candidates = build_memory_security_gate_probe_requests(0x34)
+    assert [spaced(candidate.request) for candidate in uds23_candidates] == [
+        "34 00 44 00 00 00 00 00 00 00 01",
+        "34 00 24 00 00 00 00 00 01",
+        "34 00 22 00 00 00 01",
+    ]
+    uds24_candidates = build_memory_security_gate_probe_requests(0x35)
+    assert [spaced(candidate.request) for candidate in uds24_candidates] == [
+        "35 00 44 00 00 00 00 00 00 00 01",
+        "35 00 24 00 00 00 00 00 01",
+        "35 00 22 00 00 00 01",
+    ]
+    assert "DFI 0x00" in uds23_candidates[0].annotation and "ALFI 0x44" in uds23_candidates[0].annotation
 
     assert spaced(build_uds25_request({
-        "control_type": "0x03",
+        "control_type": "0x01",
         "communication_type": "0x01",
-        "node_identification_number": "",
-    })) == "28 03 01"
+    })) == "28 01 01"
+    assert spaced(build_communication_control_restore_request({"communication_type": "0x01"})) == "28 00 01"
 
     positive = parse_uds_response(bytes.fromhex("22 F1 90"), bytes.fromhex("62 F1 90 12 34"))
     assert positive.positive_response and not positive.negative_response and not positive.malformed
@@ -3650,38 +4040,56 @@ def run_self_checks() -> None:
     assert potential_verdict == VERDICT_POTENTIAL
     no_response_reset, _ = verdict_reset(bytes.fromhex("11 01"), None, {}, [])
     assert no_response_reset == VERDICT_INCONCLUSIVE
-    unsupported_comm, _ = verdict_comm_control(bytes.fromhex("28 00 01"), bytes.fromhex("7F 28 7F"), {}, [])
-    assert unsupported_comm == "NOT_TESTABLE"
+    uds20_params = {"acceptable_nrcs": "0x22 0x24 0x31 0x33 0x7E 0x7F"}
+    uds20_verdict, _, _ = classify_uds20_reset_response(bytes.fromhex("11 03"), bytes.fromhex("7F 11 33"), uds20_params)
+    assert uds20_verdict == VERDICT_PASS_EXPECTED_DENIAL
+    uds20_verdict, _, _ = classify_uds20_reset_response(bytes.fromhex("11 03"), bytes.fromhex("51 03"), uds20_params)
+    assert uds20_verdict == VERDICT_FAIL_PRECONDITION_BYPASS
+    uds20_verdict, _, _ = classify_uds20_reset_response(bytes.fromhex("11 03"), None, uds20_params, "timeout")
+    assert uds20_verdict == VERDICT_INCONCLUSIVE_NO_RESPONSE
+    memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x34, uds23_candidates[0].request, bytes.fromhex("7F 34 33"))
+    assert memory_verdict == VERDICT_PASS_SECURITY_GATE
+    memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x34, uds23_candidates[0].request, bytes.fromhex("74 20 00"))
+    assert memory_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
+    memory_verdict, _, decisive, _ = classify_memory_transfer_probe_response(0x34, uds23_candidates[0].request, bytes.fromhex("7F 34 31"))
+    assert memory_verdict == VERDICT_INCONCLUSIVE_RANGE_CHECKED_FIRST and not decisive
+    memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x35, uds24_candidates[0].request, bytes.fromhex("7F 35 11"))
+    assert memory_verdict == VERDICT_SERVICE_NOT_SUPPORTED
+    memory_verdict, _, _, _ = classify_memory_transfer_probe_response(0x35, uds24_candidates[0].request, bytes.fromhex("75 20 00"))
+    assert memory_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
 
-    download_verdict, _ = verdict_download_upload(0x34)(
-        bytes.fromhex("34 00 44 00 00 10 00 00 00 01 00"),
-        bytes.fromhex("74 20 00"),
-        {},
-        [{"step": "test_request_without_precondition_flow"}],
-    )
-    assert download_verdict == VERDICT_FAIL
-    supplied_only_verdict, _ = verdict_download_upload(0x34)(
-        bytes.fromhex("34 00 44 00 00 10 00 00 00 01 00"),
-        bytes.fromhex("74 20 00"),
-        {},
-        [],
-    )
-    assert supplied_only_verdict == VERDICT_INCONCLUSIVE
+    comm_verdict, _, _ = classify_communication_control_response(bytes.fromhex("28 01 01"), bytes.fromhex("68 01"))
+    assert comm_verdict == VERDICT_FAIL_ACCEPTED_WITHOUT_SECURITY
+    comm_verdict, _, _ = classify_communication_control_response(bytes.fromhex("28 01 01"), bytes.fromhex("7F 28 33"))
+    assert comm_verdict == VERDICT_PASS_SECURITY_GATE
+    comm_verdict, _, _ = classify_communication_control_response(bytes.fromhex("28 01 01"), bytes.fromhex("7F 28 31"))
+    assert comm_verdict == VERDICT_PARAMETER_UNSUPPORTED
+    assert security_access_observed_before_target([
+        {"request_hex": "10 03"},
+        {"request_hex": "27 01"},
+        {"request_hex": "34 00 44 00 00 00 00 00 00 00 01"},
+    ], 0x34)
 
     def mk_target(*, dry_run: bool, authorized: bool, confirmation: str = "", output_dir: Path = DEFAULT_EVIDENCE_DIR) -> TargetProfile:
         return TargetProfile("socketcan", "can0", 0x681, 0x601, False, 0x00, 1.0, 5.0, 0.05, 0.0, 3.0, output_dir, True, dry_run, authorized, confirmation)
 
+    uds20_test = next(t for t in build_registry() if t.id == "uds_20")
+    assert [field.id for field in uds20_test.fields] == ["precondition_session_flow", "test_session_flow", "reset_subfunction", "acceptable_nrcs"]
+    assert sum(1 for field in uds20_test.fields if field.visible_if is None) == 3
+    equal_flow_errors = validate_uds20(mk_target(dry_run=True, authorized=False), default_params_for_test(uds20_test) | {"precondition_session_flow": "03", "test_session_flow": "03"})
+    assert equal_flow_errors["test_session_flow"] == "Invalid UDS-20 setup: test_session_flow must differ from precondition_session_flow."
+
     target = mk_target(dry_run=False, authorized=False)
     test = next(t for t in build_registry() if t.id == "uds_23")
-    worker = RunWorker(test, target, valid_34 | {"session_flow": ""}, "")
+    worker = RunWorker(test, target, default_params_for_test(test) | {"session_flow": ""}, "")
     assert "typed_confirmation" in worker._preflight_errors()
 
     target_authorized_no_token = mk_target(dry_run=False, authorized=True)
-    worker = RunWorker(test, target_authorized_no_token, valid_34 | {"session_flow": ""}, "")
+    worker = RunWorker(test, target_authorized_no_token, default_params_for_test(test) | {"session_flow": ""}, "")
     assert "typed_confirmation" in worker._preflight_errors()
 
     target_dry = mk_target(dry_run=True, authorized=False)
-    worker = RunWorker(test, target_dry, valid_34 | {"session_flow": ""}, "")
+    worker = RunWorker(test, target_dry, default_params_for_test(test) | {"session_flow": ""}, "")
     assert "typed_confirmation" not in worker._preflight_errors()
 
     registry = {t.id: t for t in build_registry()}
