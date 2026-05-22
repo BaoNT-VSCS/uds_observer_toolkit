@@ -2222,6 +2222,7 @@ class RunWorker(QThread):
         self.preview = preview
         self._stop_requested = False
         self._process: Optional[subprocess.Popen[str]] = None
+        self._opened_buses: list[Any] = []
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -2249,10 +2250,23 @@ class RunWorker(QThread):
                 summary = self._run_direct(evidence)
         except Exception as exc:
             summary = self._error_summary(evidence, VERDICT_CONFIG, f"{type(exc).__name__}: {exc}")
+        finally:
+            self._shutdown_open_buses()
         summary.setdefault("safety_notes", self._safety_notes())
         evidence.finalize(summary)
         summary["evidence_dir"] = evidence.display_dir
         self.finished_run.emit(summary)
+
+    def _shutdown_open_buses(self) -> None:
+        while self._opened_buses:
+            bus = self._opened_buses.pop()
+            shutdown = getattr(bus, "shutdown", None)
+            if not callable(shutdown):
+                continue
+            try:
+                shutdown()
+            except Exception as exc:
+                self.log_line.emit(f"CAN bus shutdown warning: {type(exc).__name__}: {exc}")
 
     def _preflight_errors(self) -> dict[str, str]:
         errors: dict[str, str] = {}
@@ -3113,6 +3127,7 @@ class RunWorker(QThread):
             padding=self.target.padding,
         )
         can_mod, bus = open_bus(can_cfg)
+        self._opened_buses.append(bus)
         transport = IsoTp(
             bus,
             can_mod,
@@ -3816,6 +3831,7 @@ class UdsReconGui(QMainWindow):
         self.worker.transcript_line.connect(self._append_transcript)
         self.worker.parsed_row.connect(self._append_parsed_row)
         self.worker.finished_run.connect(self._run_finished)
+        self.worker.finished.connect(self._worker_thread_finished)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self._append_log(f"Starting {self.current_test.id}: {self.current_test.title}")
@@ -3835,9 +3851,24 @@ class UdsReconGui(QMainWindow):
             self._append_log(f"Response: {summary.get('response_hex')}")
         if summary.get("evidence_dir") and summary.get("evidence_dir") != "<output not saved>":
             self._append_log(f"Evidence: {summary.get('evidence_dir')}")
+        self.stop_btn.setEnabled(False)
+        self._refresh_validation_and_preview()
+
+    def _worker_thread_finished(self) -> None:
         self.worker = None
         self.stop_btn.setEnabled(False)
         self._refresh_validation_and_preview()
+
+    def closeEvent(self, event: Any) -> None:
+        if self.worker and self.worker.isRunning():
+            self._append_log("Window close requested; stopping active run.")
+            self.worker.stop()
+            if not self.worker.wait(5000):
+                event.ignore()
+                QMessageBox.warning(self, "Run still active", "The active run did not stop within 5 seconds. Stop it before closing.")
+                return
+            self.worker = None
+        super().closeEvent(event)
 
     def _clear_results(self, *, keep_logs: bool) -> None:
         if not keep_logs:
