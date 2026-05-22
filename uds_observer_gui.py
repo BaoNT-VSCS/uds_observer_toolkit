@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -34,6 +34,7 @@ try:
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QLineEdit,
         QMainWindow,
@@ -836,6 +837,23 @@ def disruptive_confirmation_token(test_id: str) -> str:
         "uds_24": "SEND_35",
         "uds_25": "SEND_28",
     }.get(test_id, "")
+
+
+def disruptive_confirmation_prompt(test: TestDefinition) -> str:
+    service = {
+        "uds_13": "SecurityAccess SendKey 0x27",
+        "uds_14": "SecurityAccess SendKey 0x27",
+        "uds_16": "SecurityAccess SendKey 0x27",
+        "uds_17": "SecurityAccess SendKey 0x27",
+        "uds_18": "SecurityAccess SendKey 0x27",
+        "uds_20": "disruptive service 0x11 ECUReset",
+        "uds_21": "disruptive service 0x2E WriteDataByIdentifier",
+        "uds_23": "disruptive service 0x34 RequestDownload",
+        "uds_24": "disruptive service 0x35 RequestUpload",
+        "uds_25": "disruptive service 0x28 CommunicationControl",
+    }.get(test.id, "a disruptive UDS service")
+    token = disruptive_confirmation_token(test.id)
+    return f"This testcase sends {service}. Type {token} to continue."
 
 
 def validate_common_flows(_: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
@@ -2829,11 +2847,6 @@ QPushButton:hover { background: #2B5F9E; }
 QPushButton:disabled { color: #697386; background: #141922; }
 QPushButton#runButton { background: #10351F; border-color: #2F8F53; color: #81E6A5; font-weight: bold; }
 QPushButton#stopButton { background: #3A1111; border-color: #8F2F2F; color: #FF9C9C; font-weight: bold; }
-QFrame#summaryCard {
-    border: 1px solid #2A3340;
-    border-radius: 6px;
-    background: #0E141B;
-}
 QLabel#errorLabel { color: #FF9C9C; }
 QSplitter::handle { background: #2A3340; }
 """
@@ -2903,19 +2916,16 @@ class UdsReconGui(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.addWidget(self._build_target_profile())
-        content_layout.addWidget(self._build_left_panel())
-        content_layout.addWidget(self._build_center_panel())
-        content_layout.addStretch(1)
-        scroll.setWidget(content)
+        layout.addWidget(self._build_target_profile())
 
-        layout.addWidget(scroll, 1)
+        workflow = QSplitter(Qt.Orientation.Horizontal)
+        workflow.addWidget(self._build_left_panel())
+        workflow.addWidget(self._build_center_panel())
+        workflow.setChildrenCollapsible(False)
+        workflow.setSizes([360, 440])
+        workflow.setStretchFactor(0, 1)
+        workflow.setStretchFactor(1, 1)
+        layout.addWidget(workflow, 1)
         return panel
 
     def _build_target_profile(self) -> QGroupBox:
@@ -2931,7 +2941,9 @@ class UdsReconGui(QMainWindow):
         self.response_pending_timeout = QLineEdit("5.0")
         self.delay = QLineEdit("0.05")
         self.request_stmin = QLineEdit("0.0")
+        self.request_stmin.setVisible(False)
         self.fc_wait_timeout = QLineEdit("3.0")
+        self.fc_wait_timeout.setVisible(False)
         self.output_dir = QLineEdit(str(DEFAULT_EVIDENCE_DIR))
         self.browse_output = QPushButton("Browse")
         self.save_output = QCheckBox("Save output")
@@ -2950,11 +2962,6 @@ class UdsReconGui(QMainWindow):
         self.req_id.setToolTip(tx_tip)
         self.tester_rx_label.setToolTip(rx_tip)
         self.resp_id.setToolTip(rx_tip)
-        self.disruptive_confirm_label = QLabel("Typed live confirmation")
-        self.disruptive_confirm = QLineEdit("")
-        self.disruptive_confirm.setPlaceholderText("SEND_11 / SEND_28 / SEND_34 / SEND_35")
-        self.operator_notes = QLineEdit("")
-        self.operator_notes.setPlaceholderText("Optional operator notes for summary.md")
 
         items = [
             (QLabel("Interface"), self.can_interface),
@@ -2965,8 +2972,6 @@ class UdsReconGui(QMainWindow):
             (QLabel("Timeout"), self.timeout),
             (QLabel("Response pending timeout"), self.response_pending_timeout),
             (QLabel("Inter-request delay"), self.delay),
-            (QLabel("Request STmin"), self.request_stmin),
-            (QLabel("FC wait timeout"), self.fc_wait_timeout),
         ]
         for idx, (label, widget) in enumerate(items):
             grid.addWidget(label, idx // 3, idx % 3 * 2)
@@ -2977,15 +2982,11 @@ class UdsReconGui(QMainWindow):
         grid.addWidget(QLabel("Output directory"), base_row + 1, 0)
         grid.addWidget(self.output_dir, base_row + 1, 1, 1, 4)
         grid.addWidget(self.browse_output, base_row + 1, 5)
-        grid.addWidget(self.disruptive_confirm_label, base_row + 2, 0)
-        grid.addWidget(self.disruptive_confirm, base_row + 2, 1)
-        grid.addWidget(QLabel("Operator notes"), base_row + 2, 2)
-        grid.addWidget(self.operator_notes, base_row + 2, 3, 1, 3)
 
         for widget in (
             self.can_interface, self.can_channel, self.req_id, self.resp_id, self.padding,
             self.timeout, self.response_pending_timeout, self.delay, self.request_stmin,
-            self.fc_wait_timeout, self.output_dir, self.disruptive_confirm, self.operator_notes,
+            self.fc_wait_timeout, self.output_dir,
         ):
             widget.textChanged.connect(self._refresh_validation_and_preview)
         for widget in (self.extended_id, self.save_output):
@@ -3002,7 +3003,7 @@ class UdsReconGui(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(560)
+        panel.setMinimumWidth(320)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
@@ -3033,36 +3034,43 @@ class UdsReconGui(QMainWindow):
         layout.addWidget(QLabel("Description"))
         layout.addWidget(self.description)
         layout.addWidget(QLabel("Command / request preview"))
-        layout.addWidget(self.preview)
+        layout.addWidget(self.preview, 1)
         button_row = QHBoxLayout()
         button_row.addWidget(self.run_btn)
         button_row.addWidget(self.stop_btn)
         layout.addLayout(button_row)
-        layout.addStretch(1)
         return panel
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(560)
+        panel.setMinimumWidth(360)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 0, 8, 0)
-        self.params_group = QGroupBox("Parameters")
-        self.params_group.setMinimumWidth(520)
+        layout.setContentsMargins(8, 0, 0, 0)
+        self.params_header = QLabel("Parameters")
+        self.params_header.setWordWrap(True)
+        self.params_header.setStyleSheet("font-weight: bold; color: #7DB3FF; padding: 2px 0 6px 0;")
+        layout.addWidget(self.params_header)
+
+        params_content = QWidget()
+        params_content_layout = QVBoxLayout(params_content)
+        params_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.params_group = QWidget()
+        self.params_group.setMinimumWidth(330)
         self.params_layout = QFormLayout(self.params_group)
         self.params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.params_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.params_layout.setHorizontalSpacing(10)
         self.params_layout.setVerticalSpacing(6)
+        params_content_layout.addWidget(self.params_group)
+        self.did_catalog_box = self._build_did_catalog_box()
+        params_content_layout.addWidget(self.did_catalog_box)
+        params_content_layout.addStretch(1)
+
         self.params_scroll = QScrollArea()
         self.params_scroll.setWidgetResizable(True)
         self.params_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.params_scroll.setMinimumHeight(190)
-        self.params_scroll.setWidget(self.params_group)
-        layout.addWidget(self.params_scroll, 3)
-        self.did_catalog_box = self._build_did_catalog_box()
-        layout.addWidget(self.did_catalog_box)
-        layout.addWidget(self._build_summary_card())
-        layout.addStretch(1)
+        self.params_scroll.setWidget(params_content)
+        layout.addWidget(self.params_scroll, 1)
         return panel
 
     def _build_did_catalog_box(self) -> QGroupBox:
@@ -3083,27 +3091,6 @@ class UdsReconGui(QMainWindow):
         self.load_did_btn.clicked.connect(self._load_did_catalog)
         self.use_did_btn.clicked.connect(self._use_selected_did)
         return box
-
-    def _build_summary_card(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("summaryCard")
-        layout = QFormLayout(card)
-        self.verdict_label = QLabel("Not run")
-        self.rationale_label = QLabel("")
-        self.rationale_label.setWordWrap(True)
-        self.request_label = QLabel("")
-        self.request_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.response_label = QLabel("")
-        self.response_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.evidence_label = QLabel("")
-        self.evidence_label.setWordWrap(True)
-        self.evidence_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addRow("Verdict", self.verdict_label)
-        layout.addRow("Rationale", self.rationale_label)
-        layout.addRow("Request", self.request_label)
-        layout.addRow("Response", self.response_label)
-        layout.addRow("Evidence", self.evidence_label)
-        return card
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
@@ -3162,6 +3149,8 @@ class UdsReconGui(QMainWindow):
         self.resp_id.setToolTip(note if not enabled else "CAN arbitration ID used by the tester to receive diagnostic responses. ECU transmits on this ID.")
 
     def _render_params(self) -> None:
+        if hasattr(self, "params_header"):
+            self.params_header.setText(f"Parameters — {self.current_test.display_name}")
         while self.params_layout.rowCount():
             self.params_layout.removeRow(0)
         self.field_widgets.clear()
@@ -3317,9 +3306,9 @@ class UdsReconGui(QMainWindow):
             output_dir=output,
             save_output=self.save_output.isChecked(),
             dry_run=False,
-            authorized_disruptive=self.authorized_disruptive.isChecked(),
-            disruptive_confirmation=self.disruptive_confirm.text(),
-            operator_notes=self.operator_notes.text(),
+            authorized_disruptive=False,
+            disruptive_confirmation="",
+            operator_notes="",
         )
         return target, errors
 
@@ -3338,14 +3327,6 @@ class UdsReconGui(QMainWindow):
                 errors[field_spec.id] = f"{field_spec.label} is required"
         if target and self.current_test.validate:
             errors.update(self.current_test.validate(target, params))
-        live_disruptive = bool(self.current_test.disruptive and target)
-        required_token = disruptive_confirmation_token(self.current_test.id) if live_disruptive else ""
-        self.disruptive_confirm_label.setVisible(bool(required_token))
-        self.disruptive_confirm.setVisible(bool(required_token))
-        if live_disruptive and required_token:
-            self.disruptive_confirm.setPlaceholderText(required_token)
-            if required_token and target.disruptive_confirmation.strip() != required_token:
-                errors["typed_confirmation"] = f"Type {required_token} before live execution of this disruptive service."
 
         self.current_errors = errors
         for key, label in self.error_labels.items():
@@ -3402,12 +3383,30 @@ class UdsReconGui(QMainWindow):
             lines.append("Fix validation errors before running:\n" + "\n".join(f"- {msg}" for msg in errors.values()))
         return "\n\n".join(lines)
 
+    def _confirmed_disruptive_target(self, target: TargetProfile) -> Optional[TargetProfile]:
+        required_token = disruptive_confirmation_token(self.current_test.id)
+        if not (self.current_test.disruptive and required_token and not target.dry_run):
+            return target
+        entered, ok = QInputDialog.getText(
+            self,
+            "Confirm disruptive testcase",
+            disruptive_confirmation_prompt(self.current_test),
+        )
+        if not ok or entered.strip() != required_token:
+            self._append_log("Blocked: destructive confirmation failed.")
+            QMessageBox.warning(self, "Execution blocked", "Blocked: destructive confirmation failed.")
+            return None
+        return replace(target, authorized_disruptive=True, disruptive_confirmation=required_token)
+
     def _run_selected(self) -> None:
         self._refresh_validation_and_preview()
         if self.current_errors:
             QMessageBox.warning(self, "Validation error", "\n".join(self.current_errors.values()))
             return
         target, _ = self._collect_target()
+        if target is None:
+            return
+        target = self._confirmed_disruptive_target(target)
         if target is None:
             return
         if target.save_output:
@@ -3431,22 +3430,18 @@ class UdsReconGui(QMainWindow):
             self.stop_btn.setEnabled(False)
 
     def _run_finished(self, summary: dict[str, Any]) -> None:
-        self.verdict_label.setText(summary.get("verdict", ""))
-        self.rationale_label.setText(summary.get("rationale", ""))
-        self.request_label.setText(summary.get("request_hex", ""))
-        self.response_label.setText(summary.get("response_hex", ""))
-        self.evidence_label.setText(summary.get("evidence_dir", ""))
         self._append_log(f"Finished: {summary.get('verdict')} - {summary.get('rationale')}")
+        if summary.get("request_hex"):
+            self._append_log(f"Request: {summary.get('request_hex')}")
+        if summary.get("response_hex"):
+            self._append_log(f"Response: {summary.get('response_hex')}")
+        if summary.get("evidence_dir") and summary.get("evidence_dir") != "<output not saved>":
+            self._append_log(f"Evidence: {summary.get('evidence_dir')}")
         self.worker = None
         self.stop_btn.setEnabled(False)
         self._refresh_validation_and_preview()
 
     def _clear_results(self, *, keep_logs: bool) -> None:
-        self.verdict_label.setText("Not run")
-        self.rationale_label.setText("")
-        self.request_label.setText("")
-        self.response_label.setText("")
-        self.evidence_label.setText("")
         if not keep_logs:
             self.live_log.clear()
             self.transcript.clear()
