@@ -8,12 +8,14 @@ Run:
 from __future__ import annotations
 
 import csv
+import html
 import json
 import os
 import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -229,81 +231,6 @@ def normalize_payload_hex(value: Any) -> str:
     return spaced(payload)
 
 
-def parse_loose_hex_stream(text: Any) -> bytes:
-    """Extract hexadecimal bytes from mixed tool output.
-
-    CaringCaribou DID dump output may be either a raw UDS response such as
-    ``62 F1 90 11 22`` or a compact catalog line such as
-    ``0xf190 11223344``. This helper intentionally ignores non-hex text and
-    odd-length tokens so line numbers / prose do not poison DID parsing.
-    """
-    raw = str(text or "")
-    out = bytearray()
-    for token in re.findall(r"(?:0x)?[0-9A-Fa-f]{2,}", raw):
-        compact = token[2:] if token.lower().startswith("0x") else token
-        if len(compact) % 2:
-            continue
-        try:
-            out.extend(bytes.fromhex(compact))
-        except ValueError:
-            continue
-    return bytes(out)
-
-
-def extract_did_catalog_row_from_rdbi_response(response_hex: str) -> dict[str, Any]:
-    """Parse a positive RDBI response: 62 <DID_H> <DID_L> <DATA...>."""
-    raw = parse_loose_hex_stream(response_hex)
-    if len(raw) < 3 or raw[0] != 0x62:
-        return {}
-    did = (raw[1] << 8) | raw[2]
-    data = raw[3:]
-    return {
-        "did_hex": f"0x{did:04X}",
-        "did_length_bytes": str(len(data)),
-        "did_message_hex": spaced(data),
-        "raw_response_hex": spaced(raw),
-        "data_length_bytes": str(len(data)),
-        "data_hex": spaced(data),
-        "positive_response": True,
-    }
-
-
-def extract_did_message_from_text(text: Any, did_hex: Any = "") -> str:
-    """Extract DID value bytes from raw response, CSV note, or CaringCaribou line.
-
-    Supported examples:
-    - ``62 FD 01 76 86 F7 B2`` -> ``76 86 F7 B2``
-    - ``62fd017686f7b2`` -> ``76 86 F7 B2``
-    - ``0xFD01 7686F7B2`` -> ``76 86 F7 B2``
-    - ``0xFD01 76 86 F7 B2`` -> ``76 86 F7 B2``
-
-    The returned value never includes SID 0x62 or the DID echo bytes.
-    """
-    raw = parse_loose_hex_stream(text)
-    did_norm = normalize_did_hex(did_hex)
-    did_bytes = b""
-    if did_norm:
-        try:
-            did_int = int(did_norm[2:], 16)
-            did_bytes = bytes([(did_int >> 8) & 0xFF, did_int & 0xFF])
-        except ValueError:
-            did_bytes = b""
-
-    if raw:
-        if did_bytes:
-            positive = bytes([0x62]) + did_bytes
-            idx = raw.find(positive)
-            if idx >= 0 and len(raw) > idx + 3:
-                return spaced(raw[idx + 3:])
-            idx = raw.find(did_bytes)
-            if idx >= 0 and len(raw) > idx + 2:
-                return spaced(raw[idx + 2:])
-        elif raw[0] == 0x62 and len(raw) >= 3:
-            return spaced(raw[3:])
-
-    return ""
-
-
 def normalize_did_catalog_row(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize one DID catalog row for the paired UDS-22 -> UDS-21 workflow.
 
@@ -315,57 +242,26 @@ def normalize_did_catalog_row(row: dict[str, Any]) -> dict[str, Any]:
     Backward-compatible aliases are kept for older evidence files:
     - data_length_bytes
     - data_hex
-
-    Some tools, especially CaringCaribou ``dump_dids``, do not export an
-    explicit length column. In that case the message bytes are extracted from
-    ``notes`` / raw line text and length is derived automatically.
     """
     normalized = dict(row or {})
     did = normalize_did_hex(normalized.get("did_hex") or normalized.get("did") or normalized.get("identifier"))
-
-    raw_message_source = (
+    message_hex = normalize_payload_hex(
         normalized.get("did_message_hex")
         or normalized.get("message_hex")
         or normalized.get("data_hex")
         or normalized.get("response_data_hex")
-        or ""
     )
-    message_hex = normalize_payload_hex(raw_message_source)
-
-    # If the value column accidentally contains a full positive response or a
-    # CaringCaribou-style "DID DATA" line, strip the SID/DID prefix.
-    extracted_from_message = extract_did_message_from_text(raw_message_source, did)
-    if extracted_from_message:
-        message_hex = extracted_from_message
-
-    # Fallback: extract from raw response / notes. This fixes CSVs where
-    # CaringCaribou puts the actual DID value in the notes column only.
-    if not message_hex:
-        for source_key in ("raw_response_hex", "response_hex", "notes", "note", "raw_line"):
-            candidate = extract_did_message_from_text(normalized.get(source_key, ""), did)
-            if candidate:
-                message_hex = candidate
-                break
-
     length_text = str(
         normalized.get("did_length_bytes")
         or normalized.get("data_length_bytes")
         or normalized.get("length")
         or ""
     ).strip()
-
-    length_valid = False
-    if length_text:
-        try:
-            length_valid = int(length_text, 10) >= 0
-        except ValueError:
-            length_valid = False
-    if (not length_text or not length_valid) and message_hex:
+    if not length_text and message_hex:
         try:
             length_text = str(len(parse_hex_payload(message_hex, name="did_message_hex", allow_empty=True, strict_bytes=True)))
         except ValueError:
             length_text = ""
-
     normalized["did_hex"] = did
     normalized["did_length_bytes"] = length_text
     normalized["did_message_hex"] = message_hex
@@ -374,6 +270,7 @@ def normalize_did_catalog_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("did_name", "UNKNOWN")
     normalized.setdefault("notes", "")
     return normalized
+
 
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
@@ -579,6 +476,7 @@ class TargetProfile:
     request_stmin: float
     fc_wait_timeout: float
     output_dir: Path
+    save_output: bool
     dry_run: bool
     authorized_disruptive: bool
     disruptive_confirmation: str = ""
@@ -613,7 +511,8 @@ class TargetProfile:
             "inter_request_delay": self.delay,
             "request_stmin": self.request_stmin,
             "fc_wait_timeout": self.fc_wait_timeout,
-            "output_directory": str(self.output_dir),
+            "output_directory": str(self.output_dir) if self.save_output else "",
+            "save_output": self.save_output,
             "dry_run": self.dry_run,
             "authorized_disruptive_test": self.authorized_disruptive,
             "disruptive_confirmation_entered": bool(self.disruptive_confirmation.strip()),
@@ -1014,7 +913,7 @@ def validate_security_access_test(test_id: str) -> Callable[[TargetProfile, dict
                 errors["imported_seed_csv"] = "imported_seed_csv does not exist"
         if "key_policy" in params:
             policy = str(params.get("key_policy") or "")
-            allowed = {"explicit", "zero", "pattern", "format_random", "invalid_bitflip", "valid_algorithm_if_available"}
+            allowed = {"explicit", "zero", "pattern", "format_random", "invalid_bitflip"}
             if policy not in allowed:
                 errors["key_policy"] = f"key_policy must be one of {', '.join(sorted(allowed))}"
             if policy == "explicit":
@@ -1027,8 +926,6 @@ def validate_security_access_test(test_id: str) -> Callable[[TargetProfile, dict
                     parse_hex_byte(params.get("pattern_byte", "0xAA"), "pattern_byte")
                 except ValueError as exc:
                     errors["pattern_byte"] = str(exc)
-            if policy == "valid_algorithm_if_available":
-                errors["key_policy"] = "valid_algorithm_if_available selected but no algorithm is configured"
         return errors
     return _validate
 
@@ -1515,50 +1412,37 @@ def parse_did_dump_output(output: str, evidence_dir: Path) -> dict[str, Any]:
         if not did_match:
             continue
         did = int(did_match.group(1), 16)
-        did_hex = f"0x{did:04X}"
-        raw = parse_loose_hex_stream(line)
+        bytes_found = [int(x, 16) for x in re.findall(r"\b([0-9A-Fa-f]{2})\b", line)]
+        raw = bytes(bytes_found)
         data = b""
         positive = False
         nrc = ""
         nrc_meaning = ""
-        notes = line.strip()
-
+        notes = "" if raw else line.strip()
         if len(raw) >= 3 and raw[0] == 0x62 and raw[1] == ((did >> 8) & 0xFF) and raw[2] == (did & 0xFF):
             positive = True
             data = raw[3:]
         elif len(raw) >= 3 and raw[0] == 0x7F:
             nrc = f"0x{raw[2]:02X}"
             nrc_meaning = nrc_to_text(raw[2])
-            notes = "negative response; " + line.strip()
-        else:
-            # CaringCaribou often emits catalog-style rows like
-            # "0xf190 524c4c56..." instead of raw "62 f1 90 ..." responses.
-            extracted = extract_did_message_from_text(line, did_hex)
-            if extracted:
-                try:
-                    data = parse_hex_payload(extracted, name="did_message_hex", allow_empty=True, strict_bytes=True)
-                    positive = True
-                except ValueError:
-                    data = b""
-                    positive = False
-
+            notes = "negative response"
         row = normalize_did_catalog_row({
-            "did_hex": did_hex,
+            "did_hex": f"0x{did:04X}",
             "did_name": "UNKNOWN",
-            "raw_response_hex": spaced(raw) if raw and raw[0] == 0x62 else "",
-            "did_message_hex": spaced(data) if positive else "",
-            "did_length_bytes": str(len(data)) if positive else "",
-            "data_hex": spaced(data) if positive else "",
-            "data_length_bytes": str(len(data)) if positive else "",
+            "raw_response_hex": spaced(raw),
+            "did_message_hex": spaced(data),
+            "did_length_bytes": len(data) if positive else "",
+            "data_hex": spaced(data),
+            "data_length_bytes": len(data) if positive else "",
             "positive_response": positive,
             "nrc": nrc,
             "nrc_meaning": nrc_meaning,
             "notes": notes,
-            "raw_line": line.strip(),
         })
         rows.append(row)
     write_csv_json(evidence_dir, "did_catalog", rows, columns=columns)
     return {"did_catalog": rows}
+
 
 def write_csv_json(evidence_dir: Path, stem: str, rows: list[dict[str, Any]], *, columns: Optional[list[str]] = None) -> None:
     (evidence_dir / f"{stem}.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
@@ -1593,14 +1477,13 @@ SESSION_SUBFN_FLOW = FieldSpec(
     "Subfunctions only: 03 or 03 41 60. Tool adds service 0x10.",
 )
 SEED_SUBFN = FieldSpec("seed_subfn", "RequestSeed subfunction", "text", "0x01", True, "0x01")
-KEY_SUBFN = FieldSpec("key_subfn", "SendKey subfunction", "text", "", False, "default seed_subfn + 1")
+KEY_SUBFN = FieldSpec("key_subfn", "SendKey subfunction", "text", "", False, "auto: RequestSeed subfunction + 1", visible_if=lambda p: False)
 KEY_POLICY_CHOICES = (
-    Choice("explicit", "explicit"),
-    Choice("zero", "zero"),
-    Choice("pattern", "pattern"),
-    Choice("format_random", "format_random"),
-    Choice("invalid_bitflip", "invalid_bitflip"),
-    Choice("valid_algorithm_if_available", "valid_algorithm_if_available"),
+    Choice("random bytes", "format_random"),
+    Choice("all zero", "zero"),
+    Choice("fixed pattern", "pattern"),
+    Choice("bitflip observed seed", "invalid_bitflip"),
+    Choice("explicit key", "explicit"),
 )
 
 
@@ -1716,9 +1599,7 @@ def build_registry() -> list[TestDefinition]:
             mode="key-without-seed",
             objective="Verify that ECU rejects SendKey when no prior RequestSeed exists in the current sequence.",
             sends_key=True,
-            fields=(SESSION_SUBFN_FLOW, SEED_SUBFN, KEY_SUBFN) + key_policy_fields((
-                Choice("explicit", "explicit"), Choice("zero", "zero"), Choice("pattern", "pattern"), Choice("format_random", "format_random"),
-            ), "format_random") + (FieldSpec("delay_after_session", "Delay after session", "text", "0.05", False),),
+            fields=(SESSION_SUBFN_FLOW, SEED_SUBFN, KEY_SUBFN) + key_policy_fields(default="format_random") + (FieldSpec("delay_after_session", "Delay after session", "text", "0.05", False),),
         ),
         make_sa_test(
             test_id="uds_14",
@@ -1726,9 +1607,7 @@ def build_registry() -> list[TestDefinition]:
             mode="seed-timeout-key",
             objective="Verify that a seed becomes invalid after S3/session timeout or stale-seed wait.",
             sends_key=True,
-            fields=(SESSION_SUBFN_FLOW, SEED_SUBFN, KEY_SUBFN, FieldSpec("stale_seed_wait_seconds", "Stale seed wait seconds", "text", "5.0", True)) + key_policy_fields((
-                Choice("valid_algorithm_if_available", "valid_algorithm_if_available"), Choice("invalid_bitflip", "invalid_bitflip"), Choice("explicit", "explicit"),
-            ), "invalid_bitflip") + (
+            fields=(SESSION_SUBFN_FLOW, SEED_SUBFN, KEY_SUBFN, FieldSpec("stale_seed_wait_seconds", "Stale seed wait seconds", "text", "5.0", True)) + key_policy_fields(default="invalid_bitflip") + (
                 FieldSpec("delay_before_sendkey", "Delay before SendKey", "text", "0.05", False),
                 FieldSpec("reopen_session_before_sendkey", "Reopen session before SendKey", "checkbox", False),
             ),
@@ -2034,7 +1913,13 @@ def build_registry() -> list[TestDefinition]:
 
 class EvidenceWriter:
     def __init__(self, base_dir: Path, test: TestDefinition, target: TargetProfile, params: dict[str, Any]) -> None:
-        self.dir = ensure_dir(base_dir / f"{test.id}_{timestamp()}")
+        self._tmp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
+        self.save_output = bool(target.save_output)
+        if self.save_output:
+            self.dir = ensure_dir(base_dir / f"{test.id}_{timestamp()}")
+        else:
+            self._tmp_dir = tempfile.TemporaryDirectory(prefix=f"{test.id}_")
+            self.dir = Path(self._tmp_dir.name)
         self.test = test
         self.target = target
         self.params = params
@@ -2056,7 +1941,12 @@ class EvidenceWriter:
             "input_parameters": params,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
-        self.write_json("config.json", self.config)
+        if self.save_output:
+            self.write_json("config.json", self.config)
+
+    @property
+    def display_dir(self) -> str:
+        return str(self.dir) if self.save_output else "<output not saved>"
 
     def add_transcript(self, line: str) -> None:
         self.transcript.append(line)
@@ -2083,6 +1973,8 @@ class EvidenceWriter:
             writer.writerows(rows)
 
     def finalize(self, summary: dict[str, Any]) -> None:
+        if not self.save_output:
+            return
         self.write_text("transcript.txt", "\n".join(self.transcript) + ("\n" if self.transcript else ""))
         self.write_text("raw_can_or_uds_log.txt", "\n".join(self.transcript) + ("\n" if self.transcript else ""))
         if self.raw_output:
@@ -2243,7 +2135,7 @@ class RunWorker(QThread):
                 summary = self._error_summary(evidence, VERDICT_CONFIG, "; ".join(preflight_errors.values()))
                 summary["safety_notes"] = self._safety_notes()
                 evidence.finalize(summary)
-                summary["evidence_dir"] = str(evidence.dir)
+                summary["evidence_dir"] = evidence.display_dir
                 self.finished_run.emit(summary)
                 return
             if self.target.dry_run:
@@ -2258,14 +2150,12 @@ class RunWorker(QThread):
             summary = self._error_summary(evidence, VERDICT_CONFIG, f"{type(exc).__name__}: {exc}")
         summary.setdefault("safety_notes", self._safety_notes())
         evidence.finalize(summary)
-        summary["evidence_dir"] = str(evidence.dir)
+        summary["evidence_dir"] = evidence.display_dir
         self.finished_run.emit(summary)
 
     def _preflight_errors(self) -> dict[str, str]:
         errors: dict[str, str] = {}
         if self.test.disruptive and not self.target.dry_run:
-            if not self.target.authorized_disruptive:
-                errors["authorized"] = "Authorized disruptive test confirmation is required before live execution."
             required_token = disruptive_confirmation_token(self.test.id)
             if required_token and self.target.disruptive_confirmation.strip() != required_token:
                 errors["typed_confirmation"] = f"Type {required_token} before live execution of this disruptive service."
@@ -2998,18 +2888,35 @@ class UdsReconGui(QMainWindow):
         root_layout.setContentsMargins(10, 10, 10, 10)
         self.setCentralWidget(root)
 
-        root_layout.addWidget(self._build_target_profile())
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_left_panel())
-        splitter.addWidget(self._build_center_panel())
+        splitter.addWidget(self._build_control_panel())
         splitter.addWidget(self._build_right_panel())
         splitter.setChildrenCollapsible(False)
-        splitter.setSizes([330, 520, 560])
-        splitter.setStretchFactor(0, 0)
+        splitter.setSizes([760, 760])
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 1)
         root_layout.addWidget(splitter, 1)
+
+    def _build_control_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumWidth(620)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 8, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(self._build_target_profile())
+        content_layout.addWidget(self._build_left_panel())
+        content_layout.addWidget(self._build_center_panel())
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+
+        layout.addWidget(scroll, 1)
+        return panel
 
     def _build_target_profile(self) -> QGroupBox:
         box = QGroupBox("Target Profile")
@@ -3027,8 +2934,14 @@ class UdsReconGui(QMainWindow):
         self.fc_wait_timeout = QLineEdit("3.0")
         self.output_dir = QLineEdit(str(DEFAULT_EVIDENCE_DIR))
         self.browse_output = QPushButton("Browse")
+        self.save_output = QCheckBox("Save output")
+        # Kept as hidden compatibility switches for backend paths; the operator UI is live-run first.
         self.dry_run = QCheckBox("Dry run")
+        self.dry_run.setChecked(False)
+        self.dry_run.setVisible(False)
         self.authorized_disruptive = QCheckBox("Authorized test")
+        self.authorized_disruptive.setChecked(False)
+        self.authorized_disruptive.setVisible(False)
         self.tester_tx_label = QLabel("tester_tx_id")
         self.tester_rx_label = QLabel("tester_rx_id")
         tx_tip = "CAN arbitration ID used by the tester to send diagnostic requests. ECU receives on this ID."
@@ -3060,8 +2973,7 @@ class UdsReconGui(QMainWindow):
             grid.addWidget(widget, idx // 3, idx % 3 * 2 + 1)
         base_row = (len(items) + 2) // 3
         grid.addWidget(self.extended_id, base_row, 0)
-        grid.addWidget(self.dry_run, base_row, 1)
-        grid.addWidget(self.authorized_disruptive, base_row, 2, 1, 2)
+        grid.addWidget(self.save_output, base_row, 1)
         grid.addWidget(QLabel("Output directory"), base_row + 1, 0)
         grid.addWidget(self.output_dir, base_row + 1, 1, 1, 4)
         grid.addWidget(self.browse_output, base_row + 1, 5)
@@ -3076,14 +2988,21 @@ class UdsReconGui(QMainWindow):
             self.fc_wait_timeout, self.output_dir, self.disruptive_confirm, self.operator_notes,
         ):
             widget.textChanged.connect(self._refresh_validation_and_preview)
-        for widget in (self.extended_id, self.dry_run, self.authorized_disruptive):
+        for widget in (self.extended_id, self.save_output):
             widget.stateChanged.connect(self._refresh_validation_and_preview)
+        self.save_output.stateChanged.connect(self._update_output_controls)
         self.browse_output.clicked.connect(self._browse_output_dir)
+        self._update_output_controls()
         return box
+
+    def _update_output_controls(self) -> None:
+        enabled = self.save_output.isChecked()
+        self.output_dir.setEnabled(enabled)
+        self.browse_output.setEnabled(enabled)
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(280)
+        panel.setMinimumWidth(560)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 8, 0)
 
@@ -3094,11 +3013,11 @@ class UdsReconGui(QMainWindow):
         self.test_dropdown.currentIndexChanged.connect(self._test_dropdown_changed)
         self.description = QTextEdit()
         self.description.setReadOnly(True)
-        self.description.setMinimumHeight(95)
-        self.description.setMaximumHeight(145)
+        self.description.setMinimumHeight(72)
+        self.description.setMaximumHeight(105)
         self.preview = QTextEdit()
         self.preview.setReadOnly(True)
-        self.preview.setMinimumHeight(150)
+        self.preview.setMinimumHeight(110)
         self.run_btn = QPushButton("Run")
         self.run_btn.setObjectName("runButton")
         self.stop_btn = QPushButton("Stop")
@@ -3124,11 +3043,11 @@ class UdsReconGui(QMainWindow):
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(420)
+        panel.setMinimumWidth(560)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 0, 8, 0)
         self.params_group = QGroupBox("Parameters")
-        self.params_group.setMinimumWidth(380)
+        self.params_group.setMinimumWidth(520)
         self.params_layout = QFormLayout(self.params_group)
         self.params_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.params_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -3137,7 +3056,7 @@ class UdsReconGui(QMainWindow):
         self.params_scroll = QScrollArea()
         self.params_scroll.setWidgetResizable(True)
         self.params_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.params_scroll.setMinimumHeight(230)
+        self.params_scroll.setMinimumHeight(190)
         self.params_scroll.setWidget(self.params_group)
         layout.addWidget(self.params_scroll, 3)
         self.did_catalog_box = self._build_did_catalog_box()
@@ -3188,23 +3107,24 @@ class UdsReconGui(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(440)
+        panel.setMinimumWidth(560)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 0, 0, 0)
         self.live_log = QTextEdit()
         self.live_log.setReadOnly(True)
         self.transcript = QTextEdit()
         self.transcript.setReadOnly(True)
-        self.parsed_table = QTableWidget(0, 9)
-        self.parsed_table.setHorizontalHeaderLabels(["Step", "Request", "Response", "Type", "Positive", "Negative", "NRC", "Meaning", "Note"])
-        self.parsed_table.horizontalHeader().setStretchLastSection(True)
-        self.parsed_table.setMinimumHeight(140)
-        layout.addWidget(QLabel("Live log"))
-        layout.addWidget(self.live_log, 2)
+
+        log_header = QHBoxLayout()
+        log_header.addWidget(QLabel("Live log"))
+        self.clear_log_btn = QPushButton("Clear log")
+        self.clear_log_btn.clicked.connect(self._clear_log_views)
+        log_header.addStretch(1)
+        log_header.addWidget(self.clear_log_btn)
+        layout.addLayout(log_header)
+        layout.addWidget(self.live_log, 3)
         layout.addWidget(QLabel("Raw CAN / UDS transcript"))
         layout.addWidget(self.transcript, 1)
-        layout.addWidget(QLabel("Parsed response table"))
-        layout.addWidget(self.parsed_table, 1)
         return panel
 
     def _populate_tests(self) -> None:
@@ -3225,8 +3145,6 @@ class UdsReconGui(QMainWindow):
 
     def _select_test(self, test_id: str) -> None:
         self.current_test = self.tests_by_id[test_id]
-        if test_id in {"uds_23", "uds_24"}:
-            self.dry_run.setChecked(True)
         self.description.setPlainText(self.current_test.description)
         self._render_params()
         self._set_target_enabled()
@@ -3397,7 +3315,8 @@ class UdsReconGui(QMainWindow):
             request_stmin=request_stmin_value,
             fc_wait_timeout=fc_wait_timeout_value,
             output_dir=output,
-            dry_run=self.dry_run.isChecked(),
+            save_output=self.save_output.isChecked(),
+            dry_run=False,
             authorized_disruptive=self.authorized_disruptive.isChecked(),
             disruptive_confirmation=self.disruptive_confirm.text(),
             operator_notes=self.operator_notes.text(),
@@ -3419,12 +3338,10 @@ class UdsReconGui(QMainWindow):
                 errors[field_spec.id] = f"{field_spec.label} is required"
         if target and self.current_test.validate:
             errors.update(self.current_test.validate(target, params))
-        live_disruptive = bool(self.current_test.disruptive and target and not target.dry_run)
+        live_disruptive = bool(self.current_test.disruptive and target)
         required_token = disruptive_confirmation_token(self.current_test.id) if live_disruptive else ""
         self.disruptive_confirm_label.setVisible(bool(required_token))
         self.disruptive_confirm.setVisible(bool(required_token))
-        if live_disruptive and not target.authorized_disruptive:
-            errors["authorized"] = "Authorized disruptive test confirmation is required for this service."
         if live_disruptive and required_token:
             self.disruptive_confirm.setPlaceholderText(required_token)
             if required_token and target.disruptive_confirmation.strip() != required_token:
@@ -3436,10 +3353,7 @@ class UdsReconGui(QMainWindow):
 
         preview_text = self._build_preview(target, params, errors)
         self.preview.setPlainText(preview_text)
-        # Keep Run clickable so the operator receives an explicit validation
-        # dialog instead of interpreting a disabled button as a broken runner.
-        self.run_btn.setEnabled(self.worker is None)
-        self.run_btn.setToolTip("Validation errors will be shown before execution." if errors else "Run selected test")
+        self.run_btn.setEnabled(not errors and self.worker is None)
 
     def _apply_field_conditions(self, params: dict[str, Any]) -> None:
         for idx, field_spec in enumerate(self.current_test.fields):
@@ -3460,8 +3374,6 @@ class UdsReconGui(QMainWindow):
         if not target:
             return ""
         lines: list[str] = []
-        if target.dry_run:
-            lines.append("Mode: DRY RUN / no CAN frames will be transmitted")
         if "session_flow" in params:
             try:
                 session_preview = format_session_flow_preview(params.get("session_flow", ""))
@@ -3493,14 +3405,13 @@ class UdsReconGui(QMainWindow):
     def _run_selected(self) -> None:
         self._refresh_validation_and_preview()
         if self.current_errors:
-            message = "\n".join(self.current_errors.values())
-            self._append_log("Validation error before run:\n" + message)
-            QMessageBox.warning(self, "Validation error", message)
+            QMessageBox.warning(self, "Validation error", "\n".join(self.current_errors.values()))
             return
         target, _ = self._collect_target()
         if target is None:
             return
-        ensure_dir(target.output_dir)
+        if target.save_output:
+            ensure_dir(target.output_dir)
         params = self._collect_params()
         self._clear_results(keep_logs=False)
         self.worker = RunWorker(self.current_test, target, params, self.preview.toPlainText())
@@ -3536,33 +3447,44 @@ class UdsReconGui(QMainWindow):
         self.request_label.setText("")
         self.response_label.setText("")
         self.evidence_label.setText("")
-        self.parsed_table.setRowCount(0)
         if not keep_logs:
             self.live_log.clear()
             self.transcript.clear()
 
     def _append_log(self, line: str) -> None:
-        self.live_log.append(line)
+        for part in str(line).splitlines() or [""]:
+            escaped = html.escape(part)
+            lower = part.lower()
+            if "positive" in lower or "pass" in lower or "unlocked/observed" in lower:
+                color = "#6EE7B7"
+            elif "negative" in lower or "nrc" in lower or "7f " in lower:
+                color = "#FBBF24"
+            elif "fail" in lower or "finding" in lower or "error" in lower or "validation" in lower:
+                color = "#F87171"
+            elif "can tx" in lower or "uds tx" in lower:
+                color = "#93C5FD"
+            elif "can rx" in lower or "uds rx" in lower:
+                color = "#C4B5FD"
+            else:
+                color = "#E5E7EB"
+            self.live_log.append(f'<span style="color:{color}; white-space:pre-wrap;">{escaped}</span>')
 
     def _append_transcript(self, line: str) -> None:
-        self.transcript.append(line)
+        self.transcript.append(str(line))
 
     def _append_parsed_row(self, row: dict[str, Any]) -> None:
-        normalized = {
-            "Step": row.get("step", ""),
-            "Request": row.get("request_hex", row.get("service_id", row.get("did_hex", ""))),
-            "Response": row.get("response_hex", row.get("response_raw", row.get("raw_response_hex", ""))),
-            "Type": row.get("response_type", ""),
-            "Positive": str(row.get("positive_response", row.get("positive_or_negative", ""))),
-            "Negative": str(row.get("negative_response", "")),
-            "NRC": row.get("nrc", ""),
-            "Meaning": row.get("nrc_meaning", row.get("service_name_if_known", "")),
-            "Note": row.get("note", row.get("notes", "")),
-        }
-        r = self.parsed_table.rowCount()
-        self.parsed_table.insertRow(r)
-        for c, key in enumerate(normalized.keys()):
-            self.parsed_table.setItem(r, c, QTableWidgetItem(str(normalized[key])))
+        step = row.get("step", "")
+        request = row.get("request_hex", row.get("service_id", row.get("did_hex", "")))
+        response = row.get("response_hex", row.get("response_raw", row.get("raw_response_hex", "")))
+        nrc = row.get("nrc", "")
+        meaning = row.get("nrc_meaning", row.get("service_name_if_known", ""))
+        note = row.get("note", row.get("notes", ""))
+        status = "negative" if row.get("negative_response") else "positive" if row.get("positive_response") else row.get("response_type", "")
+        self._append_log(f"PARSED {step} | {status} | req={request} | resp={response} | nrc={nrc} {meaning} | {note}")
+
+    def _clear_log_views(self) -> None:
+        self.live_log.clear()
+        self.transcript.clear()
 
     def _browse_output_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select evidence output directory", self.output_dir.text())
@@ -3607,63 +3529,23 @@ class UdsReconGui(QMainWindow):
         row = self.did_catalog_table.currentRow()
         if row < 0 or row >= len(self.did_catalog_rows):
             return
-
-        cached = dict(self.did_catalog_rows[row] or {})
-        # Merge current table cells back into the cached row. This matters for
-        # catalogs imported from tools that put DID data in the Notes column.
-        table_text = []
-        for col, key in enumerate(("did_hex", "did_length_bytes", "did_message_hex", "notes")):
-            cell = self.did_catalog_table.item(row, col)
-            value = cell.text().strip() if cell else ""
-            table_text.append(value)
-            if value:
-                cached[key] = value
-
-        item = normalize_did_catalog_row(cached)
+        item = normalize_did_catalog_row(self.did_catalog_rows[row])
         did = str(item.get("did_hex", "")).strip()
         length = str(item.get("did_length_bytes") or item.get("data_length_bytes") or "").strip()
         message_hex = str(item.get("did_message_hex") or item.get("data_hex") or "").strip()
-
-        if (not length or not message_hex) and did:
-            # Last-resort extraction from all visible table text plus all cached
-            # values. This covers old CSV rows like: notes="0xf190 524c...".
-            joined = " ".join(table_text + [str(v) for v in cached.values()])
-            extracted = extract_did_message_from_text(joined, did)
-            if extracted:
-                message_hex = extracted
-                try:
-                    length = str(len(parse_hex_payload(extracted, name="did_message_hex", allow_empty=True, strict_bytes=True)))
-                except ValueError:
-                    length = ""
-                item["did_message_hex"] = message_hex
-                item["data_hex"] = message_hex
-                item["did_length_bytes"] = length
-                item["data_length_bytes"] = length
-
-        # Persist the normalized row and update the catalog table so the user
-        # can see the extracted length/message immediately.
-        self.did_catalog_rows[row] = item
-        for col, value in enumerate((did, length, message_hex, str(item.get("notes", "")))):
-            self.did_catalog_table.setItem(row, col, QTableWidgetItem(value))
 
         if did and "did_hex" in self.field_widgets and isinstance(self.field_widgets["did_hex"], QLineEdit):
             self.field_widgets["did_hex"].setText(did)
 
         if self.current_test.id == "uds_21":
-            # UDS-21 and UDS-22 are a pair: UDS-22 discovers supported DID and
-            # observed DID value length; UDS-21 writes random/zero/pattern bytes
-            # with the same length. Do not blindly copy the original DID value
-            # into Explicit data, because the purpose is unauthorized write
-            # probing, not replaying the read value.
-            generation_widget = self.field_widgets.get("data_generation")
-            if isinstance(generation_widget, QComboBox) and generation_widget.currentData() == "explicit":
-                idx = generation_widget.findData("random")
-                if idx >= 0:
-                    generation_widget.setCurrentIndex(idx)
             if length and "data_length_bytes" in self.field_widgets:
                 widget = self.field_widgets["data_length_bytes"]
                 if isinstance(widget, QLineEdit):
                     widget.setText(length)
+            if message_hex and "data_hex" in self.field_widgets:
+                widget = self.field_widgets["data_hex"]
+                if isinstance(widget, QTextEdit):
+                    widget.setPlainText(message_hex)
 
         if self.current_test.id == "uds_22":
             if "did_length_bytes" in self.field_widgets:
@@ -3677,6 +3559,7 @@ class UdsReconGui(QMainWindow):
 
         self._append_log(f"Selected DID {did or '<unknown>'}; length={length or '<unknown>'}; message={message_hex or '<empty>'}")
         self._refresh_validation_and_preview()
+
 
 def _assert_raises(fn: Callable[[], Any], expected_text: str) -> None:
     try:
@@ -3704,11 +3587,6 @@ def default_params_for_test(test: TestDefinition) -> dict[str, Any]:
 
 
 def run_self_checks() -> None:
-    assert extract_did_message_from_text("0xf190 524c4c56147384336534837313483334", "0xF190") == "52 4C 4C 56 14 73 84 33 65 34 83 73 13 48 33 34"
-    assert extract_did_message_from_text("62 FD 01 76 86 F7 B2", "0xFD01") == "76 86 F7 B2"
-    normalized = normalize_did_catalog_row({"did_hex": "0xF190", "notes": "0xf190 524c4c56147384336534837313483334"})
-    assert normalized["did_length_bytes"] == "16"
-    assert normalized["did_message_hex"].startswith("52 4C 4C 56")
     assert spaced(build_uds21_request({
         "did_hex": "0xF190",
         "data_generation": "explicit",
@@ -3796,12 +3674,12 @@ def run_self_checks() -> None:
     assert supplied_only_verdict == VERDICT_INCONCLUSIVE
 
     def mk_target(*, dry_run: bool, authorized: bool, confirmation: str = "", output_dir: Path = DEFAULT_EVIDENCE_DIR) -> TargetProfile:
-        return TargetProfile("socketcan", "can0", 0x681, 0x601, False, 0x00, 1.0, 5.0, 0.05, 0.0, 3.0, output_dir, dry_run, authorized, confirmation)
+        return TargetProfile("socketcan", "can0", 0x681, 0x601, False, 0x00, 1.0, 5.0, 0.05, 0.0, 3.0, output_dir, True, dry_run, authorized, confirmation)
 
     target = mk_target(dry_run=False, authorized=False)
     test = next(t for t in build_registry() if t.id == "uds_23")
     worker = RunWorker(test, target, valid_34 | {"session_flow": ""}, "")
-    assert "authorized" in worker._preflight_errors()
+    assert "typed_confirmation" in worker._preflight_errors()
 
     target_authorized_no_token = mk_target(dry_run=False, authorized=True)
     worker = RunWorker(test, target_authorized_no_token, valid_34 | {"session_flow": ""}, "")
@@ -3810,7 +3688,6 @@ def run_self_checks() -> None:
     target_dry = mk_target(dry_run=True, authorized=False)
     worker = RunWorker(test, target_dry, valid_34 | {"session_flow": ""}, "")
     assert "typed_confirmation" not in worker._preflight_errors()
-    assert "authorized" not in worker._preflight_errors()
 
     registry = {t.id: t for t in build_registry()}
     for test_id in ("recon_discovery", "recon_services", "recon_did_dump", "recon_subservices"):
@@ -3886,9 +3763,9 @@ def run_self_checks() -> None:
     dry_sendkey_worker = RunWorker(reg["uds_13"], mk_target(dry_run=True, authorized=False), default_params_for_test(reg["uds_13"]), "")
     assert "typed_confirmation" not in dry_sendkey_worker._preflight_errors()
     live_sendkey_worker = RunWorker(reg["uds_13"], mk_target(dry_run=False, authorized=False, confirmation="SEND_27_KEY"), default_params_for_test(reg["uds_13"]), "")
-    assert "authorized" in live_sendkey_worker._preflight_errors()
+    assert "typed_confirmation" not in live_sendkey_worker._preflight_errors()
     live_sendkey_ok = RunWorker(reg["uds_13"], mk_target(dry_run=False, authorized=True, confirmation="SEND_27_KEY"), default_params_for_test(reg["uds_13"]), "")
-    assert "authorized" not in live_sendkey_ok._preflight_errors() and "typed_confirmation" not in live_sendkey_ok._preflight_errors()
+    assert "typed_confirmation" not in live_sendkey_ok._preflight_errors()
     valid_policy_params = default_params_for_test(reg["uds_16"])
     valid_policy_params["key_policy"] = "valid_algorithm_if_available"
     assert "key_policy" in RunWorker(reg["uds_16"], mk_target(dry_run=True, authorized=False), valid_policy_params, "")._preflight_errors()
@@ -3922,7 +3799,7 @@ def run_self_checks() -> None:
             if gui.test_dropdown.itemData(i) == expected_id:
                 gui.test_dropdown.setCurrentIndex(i)
                 break
-        assert gui.dry_run.isChecked()
+        assert not gui.dry_run.isChecked()
 
 
 def main() -> int:
