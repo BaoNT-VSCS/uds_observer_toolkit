@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
-from .base import CaseContext
+from .base import CaseContext, record_result
 from ..seedkey import default_send_key_subfn, resolve_key
 from ..uds import UdsClient, UdsResult, parse_uds_response
-from ..utils import parse_byte, parse_hex_bytes, spaced
+from ..utils import parse_byte, parse_hex_bytes
 
 
 SECURITY_MODES = {
@@ -24,19 +24,6 @@ def _cfg(ctx: CaseContext, key: str, default: Any = None) -> Any:
     return ctx.raw_config.get(key, default)
 
 
-def _record(ctx: CaseContext, step: str, result: UdsResult) -> None:
-    ctx.run_logger.result(
-        testcase=ctx.name,
-        target=ctx.target.name,
-        step=step,
-        request=result.request,
-        response=result.response,
-        status=result.status,
-        nrc=result.nrc,
-        note=result.note or result.exception,
-    )
-
-
 class SecurityAccessCase:
     def run(self, client: UdsClient, ctx: CaseContext) -> int:
         mode = str(_cfg(ctx, "security_mode", _cfg(ctx, "mode", "request_seed_only"))).replace("-", "_")
@@ -51,7 +38,7 @@ class SecurityAccessCase:
             ok, session_obs = client.open_session_flow(session_flow, strict=strict_session, delay=ctx.timing.post_session_delay)
             observations.extend(session_obs)
             for step, result in session_obs:
-                _record(ctx, step, result)
+                record_result(ctx, step, result)
             if not ok:
                 return 1
 
@@ -67,7 +54,7 @@ class SecurityAccessCase:
 
         if mode == "request_seed_only":
             result = client.request(bytes([0x27, seed_subfn]), step="request-seed", frame_label="Seed")
-            _record(ctx, "request-seed", result)
+            record_result(ctx, "request-seed", result)
             return 0 if result.response else 1
 
         if mode == "key_without_seed":
@@ -75,12 +62,12 @@ class SecurityAccessCase:
             if key_delay > 0:
                 time.sleep(key_delay)
             result = client.request(bytes([0x27, key_subfn]) + key, step="send-key-without-seed", frame_label="SendKey")
-            _record(ctx, "send-key-without-seed", result)
+            record_result(ctx, "send-key-without-seed", result)
             return _rc_for_mode(mode, [("send-key-without-seed", result)])
 
         if mode == "seed_timeout_key":
             seed_result = client.request(bytes([0x27, seed_subfn]), step="request-seed-before-timeout", frame_label="Seed")
-            _record(ctx, "request-seed-before-timeout", seed_result)
+            record_result(ctx, "request-seed-before-timeout", seed_result)
             wait_s = float(_cfg(ctx, "s3_wait", 6.0))
             time.sleep(max(0.0, wait_s))
             policy = _policy_or_fallback(seed_result.seed, key_policy)
@@ -88,12 +75,12 @@ class SecurityAccessCase:
             if key_delay > 0:
                 time.sleep(key_delay)
             key_result = client.request(bytes([0x27, key_subfn]) + key, step="send-key-after-timeout", frame_label="SendKey")
-            _record(ctx, "send-key-after-timeout", key_result)
+            record_result(ctx, "send-key-after-timeout", key_result)
             return _rc_for_mode(mode, [("request-seed-before-timeout", seed_result), ("send-key-after-timeout", key_result)])
 
         if mode == "one_seed_many_keys":
             seed_result = client.request(bytes([0x27, seed_subfn]), step="request-seed-once", frame_label="Seed")
-            _record(ctx, "request-seed-once", seed_result)
+            record_result(ctx, "request-seed-once", seed_result)
             policy = _policy_or_fallback(seed_result.seed, key_policy)
             observations2: List[Tuple[str, UdsResult]] = [("request-seed-once", seed_result)]
             for i in range(1, attempts + 1):
@@ -102,7 +89,7 @@ class SecurityAccessCase:
                     time.sleep(key_delay)
                 step = f"key-attempt-{i}"
                 result = client.request(bytes([0x27, key_subfn]) + key, step=step, frame_label="SendKey")
-                _record(ctx, step, result)
+                record_result(ctx, step, result)
                 observations2.append((step, result))
                 if stop_on_positive_unlock and result.positive:
                     break
@@ -115,7 +102,7 @@ class SecurityAccessCase:
             for i in range(1, attempts + 1):
                 seed_step = f"exchange-{i}-request-seed"
                 seed_result = client.request(bytes([0x27, seed_subfn]), step=seed_step, frame_label="Seed")
-                _record(ctx, seed_step, seed_result)
+                record_result(ctx, seed_step, seed_result)
                 observations2.append((seed_step, seed_result))
                 policy = _policy_or_fallback(seed_result.seed, key_policy)
                 key, why = resolve_key(seed=seed_result.seed, seed_subfn=seed_subfn, policy=policy, explicit_key=explicit_key, pattern_byte=pattern_byte)
@@ -123,7 +110,7 @@ class SecurityAccessCase:
                     time.sleep(key_delay)
                 key_step = f"exchange-{i}-send-key"
                 key_result = client.request(bytes([0x27, key_subfn]) + key, step=key_step, frame_label="SendKey")
-                _record(ctx, key_step, key_result)
+                record_result(ctx, key_step, key_result)
                 observations2.append((key_step, key_result))
                 if stop_on_positive_unlock and key_result.positive:
                     break
@@ -141,13 +128,13 @@ class SecurityAccessCase:
             if probe_delay > 0:
                 time.sleep(probe_delay)
             probe = client.request(bytes([0x27, seed_subfn]), step="penalty-mode-request-seed-probe", frame_label="Seed")
-            _record(ctx, "penalty-mode-request-seed-probe", probe)
+            record_result(ctx, "penalty-mode-request-seed-probe", probe)
             return 0 if probe.response else 1
 
         if mode == "multi_seed_response":
             capture_window = float(_cfg(ctx, "capture_window", 1.0))
             first = client.request(bytes([0x27, seed_subfn]), step="single-request-seed", frame_label="Seed")
-            _record(ctx, "single-request-seed", first)
+            record_result(ctx, "single-request-seed", first)
             deadline = time.monotonic() + max(0.0, capture_window)
             idx = 1
             while time.monotonic() < deadline:
@@ -160,7 +147,7 @@ class SecurityAccessCase:
                     break
                 result = parse_uds_response(payload, bytes([0x27, seed_subfn]))
                 step = f"extra-positive-seed-{idx}"
-                _record(ctx, step, result)
+                record_result(ctx, step, result)
                 idx += 1
             return 0
 

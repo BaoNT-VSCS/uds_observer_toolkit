@@ -126,6 +126,12 @@ class RunLogger:
             "group": metadata.get("group", ""),
             "category": metadata.get("category", ""),
             "mode": metadata.get("mode", ""),
+            "risk_property": metadata.get("risk_property", ""),
+            "service_id": metadata.get("service_id", ""),
+            "default_payload": metadata.get("default_payload", ""),
+            "pass_criteria": _join_criteria(metadata.get("pass_criteria", "")),
+            "fail_criteria": _join_criteria(metadata.get("fail_criteria", "")),
+            "evidence_fields": _join_criteria(metadata.get("evidence_fields", "")),
             "target": target,
             "tx_id": metadata.get("tx_id", ""),
             "rx_id": metadata.get("rx_id", ""),
@@ -156,6 +162,12 @@ class RunLogger:
             "group",
             "category",
             "mode",
+            "risk_property",
+            "service_id",
+            "default_payload",
+            "pass_criteria",
+            "fail_criteria",
+            "evidence_fields",
             "target",
             "tx_id",
             "rx_id",
@@ -190,3 +202,9 @@ def _jsonable(obj: Any) -> Any:
     if isinstance(obj, tuple):
         return [_jsonable(v) for v in obj]
     return obj
+
+
+def _join_criteria(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return " | ".join(str(item) for item in value)
+    return str(value or "")

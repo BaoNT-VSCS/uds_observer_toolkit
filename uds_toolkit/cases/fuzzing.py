@@ -1,25 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Iterable, List
 
-from .base import CaseContext
-from ..config import CanConfig
-from ..uds import UdsClient, UdsResult
-from ..utils import can_id_hx, parse_byte, parse_can_id, parse_hex_bytes, parse_int_range, pad8, spaced
-
-
-def _record(ctx: CaseContext, step: str, result: UdsResult) -> None:
-    ctx.run_logger.result(
-        testcase=ctx.name,
-        target=ctx.target.name,
-        step=step,
-        request=result.request,
-        response=result.response,
-        status=result.status,
-        nrc=result.nrc,
-        note=result.note or result.exception,
-    )
+from .base import CaseContext, open_and_record_session, record_result
+from ..uds import UdsClient
+from ..utils import can_id_hx, parse_byte, parse_can_id, parse_hex_bytes, parse_int_range, pad8
 
 
 class ServiceFuzzer:
@@ -33,20 +18,15 @@ class ServiceFuzzer:
 
     def run(self, client: UdsClient, ctx: CaseContext) -> int:
         cfg = ctx.raw_config
-        session_flow = [parse_byte(x) for x in cfg.get("session_flow", ctx.target.session_flow)]
-        if session_flow:
-            ok, session_obs = client.open_session_flow(session_flow, strict=bool(cfg.get("strict_session", False)), delay=ctx.timing.post_session_delay)
-            for step, result in session_obs:
-                _record(ctx, step, result)
-            if not ok:
-                return 1
+        if not open_and_record_session(client, ctx):
+            return 1
 
         services = parse_int_range(cfg.get("services", "0x10-0x3E"), item_parser=parse_byte, max_items=int(cfg.get("max_items", 256)))
         delay = float(cfg.get("delay", ctx.timing.delay))
         stop_on_positive = bool(cfg.get("stop_on_positive", False))
         for sid in services:
             result = client.request(bytes([sid]), step=f"service-{sid:02X}", frame_label="ServiceProbe", check_subfn=False)
-            _record(ctx, f"service-{sid:02X}", result)
+            record_result(ctx, f"service-{sid:02X}", result)
             if stop_on_positive and result.positive:
                 break
             if delay > 0:
@@ -59,13 +39,8 @@ class SubserviceFuzzer:
 
     def run(self, client: UdsClient, ctx: CaseContext) -> int:
         cfg = ctx.raw_config
-        session_flow = [parse_byte(x) for x in cfg.get("session_flow", ctx.target.session_flow)]
-        if session_flow:
-            ok, session_obs = client.open_session_flow(session_flow, strict=bool(cfg.get("strict_session", False)), delay=ctx.timing.post_session_delay)
-            for step, result in session_obs:
-                _record(ctx, step, result)
-            if not ok:
-                return 1
+        if not open_and_record_session(client, ctx):
+            return 1
 
         service = parse_byte(cfg.get("service", 0x10))
         subfunctions = parse_int_range(cfg.get("subfunctions", "0x00-0x7F"), item_parser=parse_byte, max_items=int(cfg.get("max_items", 256)))
@@ -74,7 +49,7 @@ class SubserviceFuzzer:
         for sub in subfunctions:
             subfn = sub | 0x80 if suppress_bit else sub
             result = client.request(bytes([service, subfn]), step=f"subfn-{service:02X}-{subfn:02X}", frame_label="SubfnProbe")
-            _record(ctx, f"subfn-{service:02X}-{subfn:02X}", result)
+            record_result(ctx, f"subfn-{service:02X}-{subfn:02X}", result)
             if delay > 0:
                 time.sleep(delay)
         return 0
@@ -89,13 +64,8 @@ class PayloadFuzzer:
 
     def run(self, client: UdsClient, ctx: CaseContext) -> int:
         cfg = ctx.raw_config
-        session_flow = [parse_byte(x) for x in cfg.get("session_flow", ctx.target.session_flow)]
-        if session_flow:
-            ok, session_obs = client.open_session_flow(session_flow, strict=bool(cfg.get("strict_session", False)), delay=ctx.timing.post_session_delay)
-            for step, result in session_obs:
-                _record(ctx, step, result)
-            if not ok:
-                return 1
+        if not open_and_record_session(client, ctx):
+            return 1
 
         payloads = cfg.get("payloads", [])
         if not isinstance(payloads, list) or not payloads:
@@ -106,7 +76,7 @@ class PayloadFuzzer:
             if not payload:
                 continue
             result = client.request(payload, step=f"payload-{idx}", frame_label="PayloadProbe", check_subfn=False)
-            _record(ctx, f"payload-{idx}", result)
+            record_result(ctx, f"payload-{idx}", result)
             if delay > 0:
                 time.sleep(delay)
         return 0

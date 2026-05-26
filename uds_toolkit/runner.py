@@ -9,6 +9,10 @@ from .config import CanConfig, ConfigError, TargetConfig, TimingConfig, get_targ
 from .isotp import IsoTp
 from .logging_utils import ConsoleLog, RunLogger
 from .registry import make_case
+from .case_runners import make_modular_runner
+from .evidence_schema import build_placeholder_evidence_record
+from .safety import SafetyGuard
+from .testcase_model import normalize_case_model
 from .testcase_metadata import metadata_for_event, normalize_testcase_metadata, sort_testcases_by_report_order, test_id_label
 from .uds import UdsClient
 from .utils import can_id_hx, parse_byte, spaced
@@ -59,11 +63,16 @@ class Runner:
                     f"Type: {tc.get('type', '')}\n"
                     f"Target: {target_name}\n"
                     f"TX/RX: {can_id_hx(target.txid) if target else ''} -> {can_id_hx(target.rxid) if target else ''}\n"
-                    f"Session flow: {session_text}"
+                    f"Session flow: {session_text}\n"
+                    f"Risk property: {tc.get('risk_property', '')}\n"
+                    f"Pass criteria: {_criteria_text(tc.get('pass_criteria'))}\n"
+                    f"Fail criteria: {_criteria_text(tc.get('fail_criteria'))}"
                 )
                 if str(tc.get("type")) == "uds_access_control_probe":
                     for line in self._dry_run_access_control_probe(tc):
                         self.console.info(f"  [{label}] {line}")
+                elif _is_modular_placeholder(tc):
+                    self.console.info(self._modular_placeholder_preview(tc, target))
             return 0
 
         if not self.targets:
@@ -78,7 +87,9 @@ class Runner:
                     raise ConfigError(f"testcase '{tc['name']}' references unknown target '{target_name}'")
                 target = self.targets[target_name]
                 merged_tc = normalize_testcase_metadata(tc)
-                if wants_caringcaribou(merged_tc):
+                if _is_modular_placeholder(merged_tc):
+                    rc = max(rc, self._run_modular_placeholder_one(target, merged_tc))
+                elif wants_caringcaribou(merged_tc):
                     rc = max(rc, self._run_caringcaribou_one(target, merged_tc))
                 else:
                     native_cases.append((target, merged_tc))
@@ -124,7 +135,10 @@ class Runner:
             f"Engine: CaringCaribou\n"
             f"Target: {target.name}\n"
             f"TX/RX: {can_id_hx(target.txid)} -> {can_id_hx(target.rxid)}\n"
-            f"Session flow: {session_text}"
+            f"Session flow: {session_text}\n"
+            f"Risk property: {tc.get('risk_property', '')}\n"
+            f"Pass criteria: {_criteria_text(tc.get('pass_criteria'))}\n"
+            f"Fail criteria: {_criteria_text(tc.get('fail_criteria'))}"
         )
         try:
             command = build_caringcaribou_command(tc, target, self.can_cfg)
@@ -181,7 +195,10 @@ class Runner:
             f"Type: {tc.get('type', '')}\n"
             f"Target: {target.name}\n"
             f"TX/RX: {can_id_hx(target.txid)} -> {can_id_hx(target.rxid)}\n"
-            f"Session flow: {session_text}"
+            f"Session flow: {session_text}\n"
+            f"Risk property: {tc.get('risk_property', '')}\n"
+            f"Pass criteria: {_criteria_text(tc.get('pass_criteria'))}\n"
+            f"Fail criteria: {_criteria_text(tc.get('fail_criteria'))}"
         )
         ext = self.can_cfg.extended_id if target.extended_id is None else target.extended_id
         transport = IsoTp(
@@ -220,6 +237,64 @@ class Runner:
             self.console.set_test_context("")
             self.run_logger.clear_testcase_context()
         return int(case_rc or 0)
+
+    def _run_modular_placeholder_one(self, target: TargetConfig, tc: dict[str, Any]) -> int:
+        label = test_id_label(tc)
+        context = metadata_for_event(tc)
+        session_flow = tc.get("session_flow", target.session_flow)
+        session_text = spaced(bytes(parse_byte(x) for x in session_flow)) if isinstance(session_flow, list) else str(session_flow or "")
+        context.update({
+            "tx_id": can_id_hx(target.txid),
+            "rx_id": can_id_hx(target.rxid),
+            "session_flow": session_text,
+            "engine": "modular_placeholder",
+        })
+        self.run_logger.set_testcase_context(**context)
+        self.console.set_test_context(label)
+        self.console.info(
+            "\n"
+            f"===== {tc.get('display_name', tc.get('name'))} =====\n"
+            f"Internal name: {tc['name']}\n"
+            f"Type: {tc.get('type', '')}\n"
+            f"Engine: modular placeholder\n"
+            f"Target: {target.name}\n"
+            f"TX/RX: {can_id_hx(target.txid)} -> {can_id_hx(target.rxid)}\n"
+            "Execution: NOT_IMPLEMENTED / STUB; no CAN, ISO-TP, CaringCaribou, or external command is opened."
+        )
+        runner = make_modular_runner(_modular_runner_kind(tc))
+        case_model = normalize_case_model(tc)
+        safety_guard = SafetyGuard.from_mapping(tc.get("safety_guard", {}))
+        parameters = dict(tc.get("parameters") or {})
+        result = runner.run(case_model, parameters, safety_guard)
+        evidence = build_placeholder_evidence_record(
+            target_profile={"name": target.name, "txid": can_id_hx(target.txid), "rxid": can_id_hx(target.rxid)},
+            session_flow=session_text,
+            request_payload=str(parameters.get("request_payload") or tc.get("default_payload") or ""),
+            physical_observation_note=str(parameters.get("physical_observation_note") or ""),
+            verdict=result.verdict,
+            raw_log_path=str(self.run_logger.jsonl_path),
+        )
+        self.run_logger.event(
+            "modular_placeholder_result",
+            testcase=tc["name"],
+            target=target.name,
+            verdict=result.verdict,
+            rationale=result.rationale,
+            evidence_record=evidence.as_dict(),
+            runner_kind=_modular_runner_kind(tc),
+        )
+        self.console.info(f"  {result.verdict}: {result.rationale}")
+        self.console.set_test_context("")
+        self.run_logger.clear_testcase_context()
+        return 0
+
+    def _modular_placeholder_preview(self, tc: Mapping[str, Any], target: TargetConfig | None) -> str:
+        runner = make_modular_runner(_modular_runner_kind(tc))
+        case_model = normalize_case_model(tc)
+        safety_guard = SafetyGuard.from_mapping(tc.get("safety_guard", {}))
+        parameters = dict(tc.get("parameters") or {})
+        target_note = f"target={target.name}" if target else "target=<not configured>"
+        return f"  [{test_id_label(tc)}] {target_note}\n" + runner.dry_run_preview(case_model, parameters, safety_guard)
 
     def _dry_run_access_control_probe(self, tc: Mapping[str, Any]) -> list[str]:
         from .utils import parse_byte, parse_hex_bytes, spaced
@@ -262,3 +337,20 @@ class Runner:
             if service != payload[0]:
                 raise ConfigError(f"testcase '{tc.get('name')}' request #{idx} service 0x{service:02X} does not match payload SID 0x{payload[0]:02X}")
             services.append(service)
+
+
+def _criteria_text(value: Any) -> str:
+    if isinstance(value, list):
+        return " | ".join(str(item) for item in value)
+    return str(value or "")
+
+
+def _is_modular_placeholder(tc: Mapping[str, Any]) -> bool:
+    return str(tc.get("type") or "") in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}
+
+
+def _modular_runner_kind(tc: Mapping[str, Any]) -> str:
+    case_type = str(tc.get("type") or "")
+    if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+        return case_type
+    return "diagnostic_service"

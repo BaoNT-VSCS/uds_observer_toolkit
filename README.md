@@ -39,7 +39,7 @@ python3 uds_observer_gui.py
 
 ```text
 uds_observer_toolkit/
-├─ uds_observer_gui.py                  # Main GUI entrypoint
+├─ uds_observer_gui.py                  # Thin GUI compatibility entrypoint
 ├─ run_udstk.py                         # Backend CLI runner used by GUI
 ├─ requirements.txt
 ├─ configs/
@@ -48,15 +48,24 @@ uds_observer_toolkit/
 │  ├─ security_access.yaml               # UDS 0x27 behaviour probes
 │  ├─ seed_sampling.yaml                 # Same/cross-session seed sampling
 │  ├─ fuzzing_basic.yaml                 # ArbID/service/subservice/payload probes
-│  └─ uds_section10_access_control.yaml  # UDS-20 to UDS-25 access-control probes
+│  ├─ uds_section10_access_control.yaml  # UDS-20 to UDS-25 access-control probes
+│  └─ uds_section11_robustness.yaml      # UDS-26 to UDS-32 placeholder metadata
 ├─ uds_toolkit/
 │  ├─ canio.py                           # python-can bus setup
 │  ├─ isotp.py                           # Minimal ISO-TP transport
 │  ├─ uds.py                             # UDS client and response parsing
 │  ├─ runner.py                          # Config-driven orchestration
 │  ├─ registry.py                        # Testcase type registry
+│  ├─ case_registry.py                    # UDS-26..32 modular metadata loader
+│  ├─ case_runners.py                     # Future runner interfaces / stubs
+│  ├─ evidence_schema.py                  # Shared evidence field schema
+│  ├─ safety.py                           # Safety guard model
 │  ├─ logging_utils.py                   # JSONL/CSV output helpers
 │  ├─ seedkey.py                         # Lab SeedKey profile, if enabled
+│  ├─ gui/
+│  │  ├─ __init__.py
+│  │  ├─ __main__.py
+│  │  └─ app.py                          # GUI implementation
 │  └─ cases/
 │     ├─ security_access.py              # SecurityAccess testcases
 │     ├─ samplers.py                     # Seed sampling testcases
@@ -197,6 +206,39 @@ testcases:
         check_subfn: false
         redact_response_data: true
 ```
+
+Every testcase is normalized into a common V&V-oriented case model. YAML files
+may declare these fields directly; missing fields are inferred where possible:
+
+```yaml
+case_id: UDS-22
+title: Read sensitive DID without SecurityAccess
+category: Access Control
+risk_property: Sensitive DID data is disclosed without SecurityAccess.
+service_id: 0x22
+default_payload: "22 F1 90"
+preconditions:
+  - Open extended diagnostic session.
+parameters:
+  did_hex: 0xF190
+safety_level: read-only
+expected_behavior: ECU denies sensitive DID access or evidence is redacted.
+pass_criteria:
+  - ECU returns an expected negative response, such as NRC 0x33 or 0x31.
+fail_criteria:
+  - ECU returns a positive 0x62 response containing sensitive data without SecurityAccess.
+evidence_fields:
+  - request_hex
+  - response_hex
+  - nrc
+  - verdict
+  - rationale
+```
+
+`pass_criteria` and `fail_criteria` are mandatory for useful V&V reporting.
+When older YAML only has `expected_behavior` and `threat_condition`, the toolkit
+adds conservative criteria during normalization so reports still include an
+explicit basis for PASS/FAIL.
 
 Multiple YAML files can be loaded together. `testcases` lists are concatenated, not overwritten.
 

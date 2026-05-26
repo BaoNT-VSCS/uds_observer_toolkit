@@ -6,6 +6,7 @@ from .cases.security_access import SecurityAccessCase
 from .cases.samplers import SeedSamplerCrossSession, SeedSamplerSameSession
 from .cases.fuzzing import ArbIdFuzzer, PayloadFuzzer, ServiceFuzzer, SubserviceFuzzer
 from .cases.access_control import UdsAccessControlProbe
+from .case_registry import get_modular_case_definitions, get_modular_case_registry
 
 
 CASE_REGISTRY = {
@@ -26,3 +27,11 @@ def make_case(case_type: str):
     except KeyError as exc:
         known = ", ".join(sorted(CASE_REGISTRY))
         raise ValueError(f"unknown testcase type '{case_type}'. Known types: {known}") from exc
+
+
+def modular_case_definitions():
+    return get_modular_case_definitions()
+
+
+def modular_case_registry():
+    return get_modular_case_registry()

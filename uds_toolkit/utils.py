@@ -54,7 +54,9 @@ def bhex(data: bytes) -> str:
     return data.hex().upper()
 
 
-def spaced(data: bytes | bytearray | Sequence[int]) -> str:
+def spaced(data: bytes | bytearray | Sequence[int] | None) -> str:
+    if not data:
+        return ""
     return " ".join(f"{int(b) & 0xFF:02X}" for b in data)
 
 

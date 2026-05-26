@@ -4,6 +4,8 @@ import copy
 import re
 from typing import Any, Mapping
 
+from .testcase_model import apply_case_model_fields
+
 
 LEGACY_METADATA: dict[str, dict[str, Any]] = {
     "seed_cross_session_20": {
@@ -209,6 +211,7 @@ def normalize_testcase_metadata(tc: Mapping[str, Any], *, source_yaml: str = "")
     out.setdefault("threat_condition", "")
     out.setdefault("safety_level", _safety_level_from_config(out))
     out.setdefault("destructive_confirm_required", bool(out.get("safety_level") == "disruptive"))
+    out = apply_case_model_fields(out)
     out["display_name"] = format_display_name(out)
     out["metadata_warning"] = "" if out.get("test_ids") else "This testcase has no explicit test_id metadata. Add test_id in YAML for report traceability."
     return out
@@ -251,6 +254,17 @@ def metadata_for_event(tc: Mapping[str, Any]) -> dict[str, Any]:
         "category",
         "mode",
         "safety_level",
+        "case_id",
+        "risk_property",
+        "service_id",
+        "default_payload",
+        "preconditions",
+        "parameters",
+        "expected_behavior",
+        "pass_criteria",
+        "fail_criteria",
+        "evidence_fields",
+        "case_model",
         "source_yaml",
     ]
     out = {key: normalized.get(key, "" if key != "test_ids" else []) for key in keys}
@@ -295,6 +309,8 @@ def _category_from_type(case_type: str) -> str:
         return "Seed Sampling"
     if case_type == "uds_access_control_probe":
         return "Access Control"
+    if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+        return "UDS-26..32 Framework"
     if case_type.endswith("fuzzer"):
         return "Fuzzing"
     return "UNMAPPED"
@@ -334,6 +350,8 @@ def _safety_level_from_config(tc: Mapping[str, Any]) -> str:
             if isinstance(req, Mapping) and _hexish(req.get("service")) in {"0x11", "0x2E", "0x34", "0x35", "0x28"}:
                 return "disruptive"
         return "read-only"
+    if str(tc.get("type", "")) in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+        return str(tc.get("safety_level") or "framework-placeholder")
     if str(tc.get("type", "")).endswith("fuzzer"):
         return "probing"
     return "probing"
