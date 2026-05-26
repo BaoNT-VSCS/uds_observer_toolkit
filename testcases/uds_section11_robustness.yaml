@@ -1,18 +1,166 @@
 testcases:
-  - name: uds26_diagnostic_service_placeholder
+  - name: uds26_unauthenticated_control_dtc_setting
     type: diagnostic_service
     case_id: uds_26
     test_id: UDS-26
-    title: UDS-26 Diagnostic Service Placeholder
+    display_id: UDS-26
+    canonical_id: uds26_unauthenticated_control_dtc_setting
+    title: UDS-26 Unauthenticated Control DTC Setting
+    description: Check whether UDS service 0x85 ControlDTCSetting is accepted without proper authorization/security access.
     category: UDS-26..32 Framework
-    risk_property: Future diagnostic-service validation for UDS-26.
-    service_id: ""
-    default_payload: "<service> <payload>"
+    case_family: diagnostic_service
+    risk_property: diagnostic integrity / system integrity
+    service_id: "0x85"
+    default_payload: "85 01"
+    implemented: true
+    supported_subfunctions:
+      "0x01": "on / enable DTC setting"
+      "0x02": "off / disable DTC setting"
     parameters:
       session_flow: "03"
-      service_id: ""
-      request_payload: ""
+      subfunction: "0x01"
+      raw_payload_override: ""
+      advanced_raw_payload_override_enabled: false
+      authorization_state_note: "No SecurityAccess seed/key exchange performed by this test."
+      diagnostic_observation_note: ""
+      dtc_update_effect_confirmed: "unknown"
+      analyst_note: ""
       physical_observation_note: ""
+    ui_parameters:
+      - key: session_flow
+        label: Diagnostic session flow
+        kind: textarea
+        default: "03"
+        help: "Subfunctions only: 03 or 03 02."
+      - key: subfunction
+        label: ControlDTCSetting subfunction
+        kind: combo
+        default: "0x01"
+        required: true
+        choices:
+          - label: "85 01 - enable DTC setting"
+            value: "0x01"
+          - label: "85 02 - disable DTC setting (warning: may suppress DTC updates)"
+            value: "0x02"
+          - label: "85 81 - enable DTC setting, suppress positive response"
+            value: "0x81"
+          - label: "85 82 - disable DTC setting, suppress positive response (warning)"
+            value: "0x82"
+      - key: raw_payload_override
+        label: Raw payload override
+        kind: textarea
+        default: ""
+        help: "Optional full payload. For UDS-26 it must start with 85 unless advanced override is explicitly enabled."
+      - key: advanced_raw_payload_override_enabled
+        label: Advanced raw override
+        kind: checkbox
+        default: false
+        help: "Allows non-0x85 raw payloads. Use only for manual lab analysis; normal UDS-26 validation rejects them."
+      - key: authorization_state_note
+        label: Authorization/security state note
+        kind: textarea
+        default: "No SecurityAccess seed/key exchange performed by this test."
+        help: Describe active session/security state before interpreting positive responses.
+      - key: diagnostic_observation_note
+        label: Diagnostic observation note
+        kind: textarea
+        default: ""
+        help: Note DTC/logging behavior observed outside the UDS response.
+      - key: dtc_update_effect_confirmed
+        label: DTC update effect confirmed
+        kind: combo
+        default: "unknown"
+        choices:
+          - label: "unknown"
+            value: "unknown"
+          - label: "true"
+            value: "true"
+          - label: "false"
+            value: "false"
+      - key: analyst_note
+        label: Analyst note
+        kind: textarea
+        default: ""
+        help: Manual reviewer note for report context.
+      - key: physical_observation_note
+        label: Physical observation note
+        kind: textarea
+        default: ""
+        help: Optional physical or bench observation.
+      - key: max_duration_seconds
+        label: Max duration seconds
+        kind: text
+        default: "10.0"
+        required: true
+      - key: max_frame_rate
+        label: Max frame rate
+        kind: text
+        default: "2.0"
+        required: true
+      - key: tester_present_enabled
+        label: TesterPresent enabled
+        kind: checkbox
+        default: false
+      - key: tester_present_interval_seconds
+        label: TesterPresent interval seconds
+        kind: text
+        default: "2.0"
+        required: true
+    preconditions:
+      - Bench/simulator mode is required.
+      - Operator must understand that changing DTC setting may affect diagnostic logging/evidence.
+      - This test does not perform SecurityAccess seed/key exchange before ControlDTCSetting.
+      - Single-shot execution only; no flood behavior.
+    safety_level: controlled-diagnostic
+    safety_warning: Changing DTC setting may affect diagnostic evidence and logging behavior.
+    safety_guard:
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 10.0
+      max_frame_rate: 2.0
+      stop_button_required: true
+      stop_on_bus_error: true
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: ECU should not allow unauthorized ControlDTCSetting changes in a restricted state.
+    pass_criteria:
+      - ECU rejects ControlDTCSetting in the tested unauthorized state with a valid negative response or otherwise does not allow unauthorized DTC setting control.
+    fail_criteria:
+      - ECU accepts 0x85 without SecurityAccess/authorization in a state where ControlDTCSetting should be restricted.
+    evidence_fields:
+      - timestamp
+      - display_id
+      - canonical_id
+      - target_profile
+      - session_flow
+      - selected_subfunction
+      - selected_subfunction_meaning
+      - suppress_positive_response_requested
+      - raw_payload_override
+      - request_payload
+      - response_payload
+      - response_classification
+      - positive_response
+      - nrc
+      - timeout_or_no_response
+      - authorization_state_note
+      - diagnostic_observation_note
+      - dtc_update_effect_confirmed
+      - physical_observation_note
+      - analyst_note
+      - verdict
+      - raw_log_path
+
+  - name: uds27_diagnostic_service_placeholder
+    type: diagnostic_service
+    case_id: uds_27
+    test_id: UDS-27
+    title: UDS-27 Diagnostic Service Placeholder
+    category: UDS-26..32 Framework
+    risk_property: Future diagnostic-service validation for UDS-27.
+    service_id: ""
+    default_payload: "<service> <payload>"
+    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
     ui_parameters: &future_ui_parameters
       - key: session_flow
         label: Diagnostic session flow
@@ -81,25 +229,6 @@ testcases:
       - physical_observation_note
       - verdict
       - raw_log_path
-
-  - name: uds27_diagnostic_service_placeholder
-    type: diagnostic_service
-    case_id: uds_27
-    test_id: UDS-27
-    title: UDS-27 Diagnostic Service Placeholder
-    category: UDS-26..32 Framework
-    risk_property: Future diagnostic-service validation for UDS-27.
-    service_id: ""
-    default_payload: "<service> <payload>"
-    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: *future_ui_parameters
-    preconditions: *future_preconditions
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Case definition is visible and reviewable; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: *future_evidence_fields
 
   - name: uds28_flood_placeholder
     type: flood

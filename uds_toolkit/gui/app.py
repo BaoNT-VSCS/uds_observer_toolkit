@@ -53,7 +53,7 @@ except ImportError as exc:  # pragma: no cover - startup guard
 
 from uds_toolkit.nrc import NRC_NAMES
 from uds_toolkit.case_runners import make_modular_runner
-from uds_toolkit.evidence_schema import build_placeholder_evidence_record
+from uds_toolkit.evidence_schema import build_evidence_record, build_placeholder_evidence_record
 from uds_toolkit.registry import modular_case_definitions
 from uds_toolkit.safety import SafetyGuard, validate_safety_guard
 from uds_toolkit.seedkey import default_send_key_subfn as default_key_subfn
@@ -713,6 +713,8 @@ class TestDefinition:
     safety_guard: dict[str, Any] = dataclass_field(default_factory=dict)
     evidence_schema: dict[str, Any] = dataclass_field(default_factory=dict)
     implemented: bool = True
+    display_id: str = ""
+    canonical_id: str = ""
 
     def __post_init__(self) -> None:
         if not self.display_name:
@@ -1958,6 +1960,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
                 param.default,
                 param.required,
                 param.help,
+                tuple(Choice(str(choice.get("label", choice.get("value", ""))), str(choice.get("value", ""))) for choice in param.choices),
             )
             for param in case_def.parameters
         )
@@ -1971,7 +1974,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             model.expected_behavior,
             "",
             f"Runner interface: {runner_label}",
-            "Execution status: placeholder only. No CAN frame is transmitted for this case yet.",
+            "Execution status: implemented controlled diagnostic request." if case_def.implemented else "Execution status: placeholder only. No CAN frame is transmitted for this case yet.",
         ]).strip()
         tests.append(TestDefinition(
             id=model.case_id,
@@ -1979,14 +1982,14 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             display_name=model.title,
             category=model.category,
             description=description,
-            runner_kind="modular_stub",
+            runner_kind=case_def.runner_kind if case_def.implemented else "modular_stub",
             fields=fields,
             objective=model.expected_behavior,
             reference_source="Section 11 UDS-26..32 modular framework placeholder",
             safety_level=model.safety_level,
             target_required=True,
             disruptive=False,
-            validate=validate_modular_placeholder,
+            validate=validate_modular_case(case_def),
             evidence_fields=tuple(model.evidence_fields),
             summary_template="modular_placeholder_report",
             risk_property=model.risk_property,
@@ -1999,6 +2002,8 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             safety_guard=case_def.safety_guard.as_dict(),
             evidence_schema=case_def.evidence_schema.as_dict(),
             implemented=case_def.implemented,
+            display_id=case_def.display_id,
+            canonical_id=case_def.canonical_id,
         ))
     return tests
 
@@ -2009,6 +2014,25 @@ def _gui_field_kind(kind: str) -> str:
     if kind in {"textarea", "checkbox", "combo", "text"}:
         return kind
     return "text"
+
+
+def validate_modular_case(case_def: Any) -> Callable[[TargetProfile, dict[str, Any]], dict[str, str]]:
+    def validator(_: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
+        errors = validate_modular_placeholder(_, params)
+        if errors:
+            return errors
+        try:
+            runner = make_modular_runner(case_def.runner_kind)
+            guard_data = case_def.safety_guard.as_dict()
+            for key in ("max_duration_seconds", "max_frame_rate", "tester_present_enabled", "tester_present_interval_seconds"):
+                if key in params:
+                    guard_data[key] = params[key]
+            errors.update(runner.validate(case_def.model, params, SafetyGuard.from_mapping(guard_data)))
+        except ValueError as exc:
+            errors["runner"] = str(exc)
+        return errors
+
+    return validator
 
 
 def validate_modular_placeholder(_: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
@@ -2436,6 +2460,8 @@ class EvidenceWriter:
             "safety_guard": test.safety_guard,
             "evidence_schema": test.evidence_schema,
             "implemented": test.implemented,
+            "display_id": test.display_id or test.id.upper(),
+            "canonical_id": test.canonical_id or test.id,
             "command_argv": self.command_argv,
             "command_preview": command_preview_from_argv(self.command_argv) if self.command_argv else "",
             "target_profile": target.as_dict(),
@@ -2671,6 +2697,8 @@ class RunWorker(QThread):
                 summary = self._run_security_access(evidence)
             elif self.test.runner_kind == "modular_stub":
                 summary = self._run_modular_stub(evidence)
+            elif self.test.runner_kind == "diagnostic_service":
+                summary = self._run_diagnostic_service(evidence)
             else:
                 summary = self._run_direct(evidence)
         except Exception as exc:
@@ -2702,9 +2730,12 @@ class RunWorker(QThread):
                 self.test.build_request(self.params)
             except ValueError as exc:
                 errors["request"] = str(exc)
-        if self.test.runner_kind == "modular_stub":
+        if self.test.runner_kind in {"modular_stub", "diagnostic_service", "flood", "robustness", "can_priority_flood"}:
             try:
-                errors.update(validate_safety_guard(self._effective_safety_guard()))
+                guard = self._effective_safety_guard()
+                errors.update(validate_safety_guard(guard))
+                if self.test.runner_kind != "modular_stub" and guard.manual_confirm_required and not self.target.dry_run and not self.target.authorized_disruptive:
+                    errors["manual_confirm_required"] = "Manual operator authorization is required before running this case."
             except ValueError as exc:
                 errors["safety_guard"] = str(exc)
         return errors
@@ -2733,9 +2764,11 @@ class RunWorker(QThread):
             "evidence_output_fields": list(self.test.evidence_fields),
             "case_model": self.test.case_model,
             "runner_interface": self.test.runner_interface,
-            "safety_guard": self._effective_safety_guard().as_dict() if self.test.runner_kind == "modular_stub" else self.test.safety_guard,
+            "safety_guard": self._effective_safety_guard().as_dict() if self.test.runner_kind in {"modular_stub", "diagnostic_service", "flood", "robustness", "can_priority_flood"} else self.test.safety_guard,
             "evidence_schema": self.test.evidence_schema,
             "implemented": self.test.implemented,
+            "display_id": self.test.display_id or self.test.id.upper(),
+            "canonical_id": self.test.canonical_id or self.test.id,
             "command_argv": command_argv_for(self.test, self.target, self.params),
             "command_preview": command_preview_from_argv(command_argv_for(self.test, self.target, self.params)),
             "target_profile": self.target.as_dict(),
@@ -2806,6 +2839,156 @@ class RunWorker(QThread):
         ).as_dict()
         return summary
 
+    def _run_diagnostic_service(self, evidence: EvidenceWriter) -> dict[str, Any]:
+        case_model = normalize_case_model(self.test.case_model)
+        safety_guard = self._effective_safety_guard()
+        runner = make_modular_runner(self.test.runner_interface or "diagnostic_service")
+        errors = runner.validate(case_model, self.params, safety_guard)
+        if errors:
+            return self._error_summary(evidence, VERDICT_CONFIG, json.dumps(errors, sort_keys=True))
+
+        payload = runner.build_payload(case_model, self.params)
+        suppress_positive = runner.suppress_positive_response_requested(payload)
+        subfunction_meaning = runner.selected_subfunction_meaning(payload)
+        observations: list[dict[str, Any]] = []
+        for note in self._safety_notes():
+            self.log_line.emit(f"Safety note: {note}")
+            evidence.add_transcript(f"SAFETY: {note}")
+        if case_model.service_id.lower() in {"0x85", "85"}:
+            warning = "ControlDTCSetting may affect diagnostic evidence and logging behavior."
+            self.log_line.emit(f"Safety note: {warning}")
+            evidence.add_transcript(f"SAFETY: {warning}")
+        evidence.add_transcript("ASSERTION No SecurityAccess seed/key exchange is performed by this runner before the tested request.")
+
+        client = self._open_uds_client()
+        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations)
+        if session_failure:
+            session_failure.update({
+                "request_hex": spaced(payload),
+                "response_classification": "session_flow_failed",
+                "selected_subfunction": str(self.params.get("subfunction") or ""),
+                "selected_subfunction_meaning": subfunction_meaning,
+                "suppress_positive_response_requested": suppress_positive,
+                "raw_payload_override": str(self.params.get("raw_payload_override") or ""),
+                "authorization_state_note": str(self.params.get("authorization_state_note") or ""),
+                "diagnostic_observation_note": str(self.params.get("diagnostic_observation_note") or ""),
+                "dtc_update_effect_confirmed": str(self.params.get("dtc_update_effect_confirmed") or "unknown"),
+                "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
+                "analyst_note": str(self.params.get("analyst_note") or ""),
+            })
+            session_failure["evidence_record"] = self._diagnostic_service_evidence_record(
+                verdict=str(session_failure.get("verdict") or VERDICT_INCONCLUSIVE),
+                request_payload=spaced(payload),
+                response_payload="",
+                response_classification="session_flow_failed",
+                positive_response=False,
+                nrc="",
+                timeout_or_no_response=False,
+                selected_subfunction=runner.selected_subfunction(payload),
+                suppress_positive_response_requested=suppress_positive,
+                selected_subfunction_meaning=subfunction_meaning,
+                evidence=evidence,
+            )
+            return session_failure
+
+        if self._stop_requested:
+            return self._error_summary(evidence, VERDICT_INCONCLUSIVE, "Stop requested before diagnostic request was sent.")
+
+        exchange = self._send_uds(client, payload)
+        parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
+        obs = self._observation("control_dtc_setting", payload, exchange.response, parsed, exchange.error)
+        observations.append(obs)
+        self.parsed_row.emit(obs)
+        evidence.add_transcript(f"CONTROL_DTC_SETTING TX {spaced(payload)}")
+        evidence.add_transcript(f"CONTROL_DTC_SETTING RX {obs.get('response_hex') or '<no response>'} [{obs.get('response_type')}] {obs.get('note')}")
+
+        result = runner.classify_response(
+            positive=parsed.positive_response,
+            negative=parsed.negative_response,
+            response_type=parsed.response_type,
+            nrc=f"0x{parsed.nrc:02X}" if parsed.nrc is not None else "",
+            error=exchange.error,
+            parameters=self.params,
+            suppress_positive_response_requested=suppress_positive,
+        )
+        summary = self._base_summary(evidence)
+        summary.update({
+            "request_hex": spaced(payload),
+            "response_hex": obs.get("response_hex", ""),
+            "response_type": obs.get("response_type", ""),
+            "response_classification": obs.get("response_type", ""),
+            "positive_response": bool(obs.get("positive_response", False)),
+            "negative_response": bool(obs.get("negative_response", False)),
+            "nrc": obs.get("nrc", ""),
+            "nrc_meaning": obs.get("nrc_meaning", ""),
+            "suppress_positive_response_requested": suppress_positive,
+            "verdict": result.verdict,
+            "rationale": result.rationale,
+            "observations": observations,
+            "execution_steps": runner.plan(case_model, self.params, safety_guard).as_dict().get("steps", []),
+            "selected_subfunction": str(self.params.get("subfunction") or ""),
+            "selected_subfunction_meaning": subfunction_meaning,
+            "raw_payload_override": str(self.params.get("raw_payload_override") or ""),
+            "authorization_state_note": str(self.params.get("authorization_state_note") or ""),
+            "diagnostic_observation_note": str(self.params.get("diagnostic_observation_note") or ""),
+            "dtc_update_effect_confirmed": str(self.params.get("dtc_update_effect_confirmed") or "unknown"),
+            "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
+            "analyst_note": str(self.params.get("analyst_note") or ""),
+        })
+        summary["evidence_record"] = self._diagnostic_service_evidence_record(
+            verdict=result.verdict,
+            request_payload=spaced(payload),
+            response_payload=str(obs.get("response_hex") or ""),
+            response_classification=str(obs.get("response_type") or ""),
+            positive_response=bool(obs.get("positive_response", False)),
+            nrc=str(obs.get("nrc") or ""),
+            timeout_or_no_response=str(obs.get("response_type") or "") in {"timeout", "no_response"},
+            selected_subfunction=runner.selected_subfunction(payload),
+            suppress_positive_response_requested=suppress_positive,
+            selected_subfunction_meaning=subfunction_meaning,
+            evidence=evidence,
+        )
+        return summary
+
+    def _diagnostic_service_evidence_record(
+        self,
+        *,
+        verdict: str,
+        request_payload: str,
+        response_payload: str,
+        response_classification: str,
+        positive_response: bool,
+        nrc: str,
+        timeout_or_no_response: bool,
+        evidence: EvidenceWriter,
+        selected_subfunction: str = "",
+        suppress_positive_response_requested: bool = False,
+        selected_subfunction_meaning: str = "",
+    ) -> dict[str, Any]:
+        return build_evidence_record(
+            display_id=self.test.display_id or self.test.id.upper(),
+            canonical_id=self.test.canonical_id or self.test.id,
+            target_profile=self.target.as_dict(),
+            session_flow=str(self.params.get("session_flow") or ""),
+            selected_subfunction=selected_subfunction or str(self.params.get("subfunction") or ""),
+            selected_subfunction_meaning=selected_subfunction_meaning,
+            suppress_positive_response_requested=suppress_positive_response_requested,
+            raw_payload_override=str(self.params.get("raw_payload_override") or ""),
+            request_payload=request_payload,
+            response_payload=response_payload,
+            response_classification=response_classification,
+            positive_response=positive_response,
+            nrc=nrc,
+            timeout_or_no_response=timeout_or_no_response,
+            authorization_state_note=str(self.params.get("authorization_state_note") or ""),
+            diagnostic_observation_note=str(self.params.get("diagnostic_observation_note") or ""),
+            dtc_update_effect_confirmed=str(self.params.get("dtc_update_effect_confirmed") or "unknown"),
+            physical_observation_note=str(self.params.get("physical_observation_note") or ""),
+            analyst_note=str(self.params.get("analyst_note") or ""),
+            verdict=verdict,
+            raw_log_path=str(evidence.dir / "raw_can_or_uds_log.txt") if evidence.save_output else "",
+        ).as_dict()
+
     def _dry_run(self, evidence: EvidenceWriter) -> dict[str, Any]:
         self.log_line.emit("Dry run only. No CAN request or external command was executed.")
         for note in self._safety_notes():
@@ -2830,6 +3013,47 @@ class RunWorker(QThread):
                 summary["seed_length_report"] = []
             if self.test.id == "uds_15":
                 summary["requestseed_limit"] = []
+        elif self.test.runner_kind == "diagnostic_service":
+            case_model = normalize_case_model(self.test.case_model)
+            guard = self._effective_safety_guard()
+            runner = make_modular_runner(self.test.runner_interface or "diagnostic_service")
+            plan = runner.plan(case_model, self.params, guard).as_dict()
+            request_payload = ""
+            suppress_positive = False
+            subfunction_meaning = ""
+            selected_subfunction = ""
+            try:
+                payload_bytes = runner.build_payload(case_model, self.params)
+                request_payload = spaced(payload_bytes)
+                selected_subfunction = runner.selected_subfunction(payload_bytes)
+                suppress_positive = runner.suppress_positive_response_requested(payload_bytes)
+                subfunction_meaning = runner.selected_subfunction_meaning(payload_bytes)
+            except ValueError as exc:
+                request_payload = f"<invalid: {exc}>"
+            summary["execution_steps"] = plan.get("steps", [])
+            summary["request_hex"] = request_payload
+            summary["selected_subfunction"] = selected_subfunction or str(self.params.get("subfunction") or "")
+            summary["selected_subfunction_meaning"] = subfunction_meaning
+            summary["suppress_positive_response_requested"] = suppress_positive
+            summary["raw_payload_override"] = str(self.params.get("raw_payload_override") or "")
+            summary["authorization_state_note"] = str(self.params.get("authorization_state_note") or "")
+            summary["diagnostic_observation_note"] = str(self.params.get("diagnostic_observation_note") or "")
+            summary["dtc_update_effect_confirmed"] = str(self.params.get("dtc_update_effect_confirmed") or "unknown")
+            summary["physical_observation_note"] = str(self.params.get("physical_observation_note") or "")
+            summary["analyst_note"] = str(self.params.get("analyst_note") or "")
+            summary["evidence_record"] = self._diagnostic_service_evidence_record(
+                verdict="DRY_RUN / NOT_EXECUTED",
+                request_payload=request_payload,
+                response_payload="",
+                response_classification="dry_run",
+                positive_response=False,
+                nrc="",
+                timeout_or_no_response=False,
+                selected_subfunction=selected_subfunction,
+                suppress_positive_response_requested=suppress_positive,
+                selected_subfunction_meaning=subfunction_meaning,
+                evidence=evidence,
+            )
         elif self.test.id in {"uds_23", "uds_24"}:
             service_id = 0x34 if self.test.id == "uds_23" else 0x35
             candidates = memory_transfer_request_candidates(service_id, self.params)
@@ -4327,7 +4551,7 @@ class UdsReconGui(QMainWindow):
                     f"{idx + 1:02d}. {step.get('step')} {step.get('request_hex', '') or ('wait=' + str(step.get('wait_seconds')) + 's' if step.get('wait_seconds') is not None else '')}"
                     for idx, step in enumerate(plan)
                 )
-            elif self.current_test.runner_kind == "modular_stub":
+            elif self.current_test.runner_kind in {"modular_stub", "diagnostic_service"}:
                 guard = SafetyGuard.from_mapping(self.current_test.safety_guard | {
                     key: params[key] for key in (
                         "max_duration_seconds",
@@ -4339,13 +4563,8 @@ class UdsReconGui(QMainWindow):
                 case_model = normalize_case_model(self.current_test.case_model)
                 runner = make_modular_runner(self.current_test.runner_interface or "diagnostic_service")
                 plan = runner.plan(case_model, params, guard).as_dict()
-                preview = "\n".join([
-                    f"Case: {case_model.case_id} - {case_model.title}",
-                    f"Runner: {plan.get('runner_name', self.current_test.runner_interface)}",
-                    "Execution: placeholder only; no CAN frame will be sent.",
-                    f"Safety guard: {json.dumps(guard.as_dict(), sort_keys=True)}",
-                    f"Evidence schema: {', '.join(self.current_test.evidence_schema.get('fields', []))}",
-                ])
+                preview = runner.dry_run_preview(case_model, params, guard)
+                preview += "\n" + f"Evidence schema: {', '.join(self.current_test.evidence_schema.get('fields', []))}"
             elif self.current_test.id in {"uds_23", "uds_24"}:
                 service_id = 0x34 if self.current_test.id == "uds_23" else 0x35
                 preview = format_memory_transfer_preview(service_id, params)
@@ -4785,7 +5004,15 @@ def run_self_checks() -> None:
         assert test_id in ids, f"{test_id} not registered"
         reg_entry = next((test for test in registry_list if test.id == test_id), None)
         assert reg_entry is not None
-        assert reg_entry.runner_kind == "modular_stub"
+        if test_id == "uds_26":
+            assert reg_entry.runner_kind == "diagnostic_service"
+            subfunction_field = next(field for field in reg_entry.fields if field.id == "subfunction")
+            assert [choice.value for choice in subfunction_field.choices] == ["0x01", "0x02", "0x81", "0x82"]
+            assert subfunction_field.default == "0x01"
+            assert reg_entry.display_id == "UDS-26"
+            assert reg_entry.canonical_id == "uds26_unauthenticated_control_dtc_setting"
+        else:
+            assert reg_entry.runner_kind == "modular_stub"
         assert reg_entry.category == "UDS-26..32 Framework"
     for test_def in registry_list:
         assert test_def.objective
@@ -4877,11 +5104,46 @@ def run_self_checks() -> None:
     assert gui.test_dropdown.count() == 7
     first_future_id = gui.test_dropdown.itemData(0)
     assert first_future_id == "uds_26"
-    assert gui.tests_by_id[first_future_id].runner_kind == "modular_stub"
-    assert "request_payload" in {field.id for field in gui.tests_by_id[first_future_id].fields}
+    assert gui.tests_by_id[first_future_id].runner_kind == "diagnostic_service"
+    assert "subfunction" in {field.id for field in gui.tests_by_id[first_future_id].fields}
+    uds26_runner = make_modular_runner("diagnostic_service")
+    uds26_case_model = normalize_case_model(registry["uds_26"].case_model)
+    raw_errors = uds26_runner.validate(
+        uds26_case_model,
+        default_params_for_test(registry["uds_26"]) | {"raw_payload_override": "28 00"},
+        SafetyGuard.from_mapping(registry["uds_26"].safety_guard),
+    )
+    assert "must start with service 0x85" in raw_errors["request_payload"]
+    suppress_payload = uds26_runner.build_payload(uds26_case_model, default_params_for_test(registry["uds_26"]) | {"subfunction": "0x81"})
+    assert spaced(suppress_payload) == "85 81"
+    assert uds26_runner.suppress_positive_response_requested(suppress_payload)
+    suppress_result = uds26_runner.classify_response(
+        positive=False,
+        negative=False,
+        response_type="timeout",
+        parameters=default_params_for_test(registry["uds_26"]) | {"subfunction": "0x81"},
+        suppress_positive_response_requested=True,
+    )
+    assert suppress_result.verdict == "OBSERVATION"
+    uds26_dir = Path(tempfile.mkdtemp())
+    uds26_target = mk_target(dry_run=True, authorized=False, output_dir=uds26_dir)
+    uds26_test = registry["uds_26"]
+    uds26_params = default_params_for_test(uds26_test)
+    uds26_worker = RunWorker(uds26_test, uds26_target, uds26_params, "")
+    uds26_worker.run()
+    assert uds26_worker._process is None
+    assert uds26_worker._opened_buses == []
+    uds26_run_dir = next(uds26_dir.iterdir())
+    uds26_summary = json.loads((uds26_run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert uds26_summary["request_hex"] == "85 01"
+    assert uds26_summary["display_id"] == "UDS-26"
+    assert uds26_summary["canonical_id"] == "uds26_unauthenticated_control_dtc_setting"
+    assert uds26_summary["evidence_record"]["selected_subfunction_meaning"] == "enable DTC setting"
+    assert uds26_summary["evidence_record"]["suppress_positive_response_requested"] is False
+    assert uds26_summary["verdict"] == "DRY_RUN / NOT_EXECUTED"
     placeholder_dir = Path(tempfile.mkdtemp())
     placeholder_target = mk_target(dry_run=False, authorized=False, output_dir=placeholder_dir)
-    placeholder_test = registry["uds_26"]
+    placeholder_test = registry["uds_27"]
     placeholder_params = default_params_for_test(placeholder_test)
     placeholder_worker = RunWorker(placeholder_test, placeholder_target, placeholder_params, "")
     placeholder_worker.run()

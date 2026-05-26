@@ -6,6 +6,7 @@ from .cases.security_access import SecurityAccessCase
 from .cases.samplers import SeedSamplerCrossSession, SeedSamplerSameSession
 from .cases.fuzzing import ArbIdFuzzer, PayloadFuzzer, ServiceFuzzer, SubserviceFuzzer
 from .cases.access_control import UdsAccessControlProbe
+from .cases.diagnostic_service import DiagnosticServiceCase
 from .case_registry import get_modular_case_definitions, get_modular_case_registry
 
 
@@ -18,6 +19,7 @@ CASE_REGISTRY = {
     "payload_fuzzer": PayloadFuzzer,
     "arb_id_fuzzer": ArbIdFuzzer,
     "uds_access_control_probe": UdsAccessControlProbe,
+    "diagnostic_service": DiagnosticServiceCase,
 }
 
 

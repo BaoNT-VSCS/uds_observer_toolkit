@@ -200,6 +200,8 @@ def normalize_testcase_metadata(tc: Mapping[str, Any], *, source_yaml: str = "")
         out.setdefault("source_file", out.get("source_yaml", ""))
 
     out.setdefault("title", internal_name or "Untitled testcase")
+    out.setdefault("display_id", out.get("test_id") or _first(out.get("test_ids")) or internal_name)
+    out.setdefault("canonical_id", out.get("name") or internal_name)
     out.setdefault("group", "UNMAPPED")
     out.setdefault("category", _category_from_type(case_type))
     out.setdefault("mode", _mode_from_config(out))
@@ -246,6 +248,8 @@ def metadata_for_event(tc: Mapping[str, Any]) -> dict[str, Any]:
     keys = [
         "test_id",
         "test_ids",
+        "display_id",
+        "canonical_id",
         "title",
         "display_name",
         "internal_name",

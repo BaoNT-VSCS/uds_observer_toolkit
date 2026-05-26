@@ -23,6 +23,7 @@ class ParameterDefinition:
     default: Any = ""
     required: bool = False
     help: str = ""
+    choices: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ParameterDefinition":
@@ -33,6 +34,7 @@ class ParameterDefinition:
             default=copy.deepcopy(raw.get("default", "")),
             required=bool(raw.get("required", False)),
             help=str(raw.get("help", "")),
+            choices=tuple(dict(item) for item in raw.get("choices", []) if isinstance(item, Mapping)),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -43,6 +45,7 @@ class ParameterDefinition:
             "default": copy.deepcopy(self.default),
             "required": self.required,
             "help": self.help,
+            "choices": [copy.deepcopy(choice) for choice in self.choices],
         }
 
 
@@ -55,6 +58,8 @@ class ModularCaseDefinition:
     evidence_schema: EvidenceSchema = field(default_factory=EvidenceSchema)
     implemented: bool = False
     source_yaml: str = ""
+    display_id: str = ""
+    canonical_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +70,8 @@ class ModularCaseDefinition:
             "evidence_schema": self.evidence_schema.as_dict(),
             "implemented": self.implemented,
             "source_yaml": self.source_yaml,
+            "display_id": self.display_id,
+            "canonical_id": self.canonical_id,
         }
 
 
@@ -119,6 +126,8 @@ def _definition_from_yaml_case(raw: Mapping[str, Any], source: Path) -> ModularC
         evidence_schema=EvidenceSchema(tuple(model.evidence_fields or EVIDENCE_SCHEMA_FIELDS)),
         implemented=bool(raw.get("implemented", False)),
         source_yaml=(Path("testcases") / source.name).as_posix(),
+        display_id=str(raw.get("display_id") or raw.get("test_id") or case_id),
+        canonical_id=str(raw.get("canonical_id") or raw.get("name") or case_id),
     )
 
 

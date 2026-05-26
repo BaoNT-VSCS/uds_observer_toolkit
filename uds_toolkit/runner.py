@@ -60,6 +60,8 @@ class Runner:
                     "\n"
                     f"===== {label} — {tc.get('title', tc.get('name'))} =====\n"
                     f"Internal name: {tc.get('internal_name', tc.get('name', ''))}\n"
+                    f"Display ID: {tc.get('display_id', tc.get('test_id', label))}\n"
+                    f"Canonical ID: {tc.get('canonical_id', tc.get('name', ''))}\n"
                     f"Type: {tc.get('type', '')}\n"
                     f"Target: {target_name}\n"
                     f"TX/RX: {can_id_hx(target.txid) if target else ''} -> {can_id_hx(target.rxid) if target else ''}\n"
@@ -71,8 +73,8 @@ class Runner:
                 if str(tc.get("type")) == "uds_access_control_probe":
                     for line in self._dry_run_access_control_probe(tc):
                         self.console.info(f"  [{label}] {line}")
-                elif _is_modular_placeholder(tc):
-                    self.console.info(self._modular_placeholder_preview(tc, target))
+                elif _is_modular_case(tc):
+                    self.console.info(self._modular_preview(tc, target))
             return 0
 
         if not self.targets:
@@ -92,6 +94,15 @@ class Runner:
                 elif wants_caringcaribou(merged_tc):
                     rc = max(rc, self._run_caringcaribou_one(target, merged_tc))
                 else:
+                    if _is_modular_case(merged_tc):
+                        errors = self._preflight_modular_case(merged_tc)
+                        if errors:
+                            raise ConfigError(f"testcase '{merged_tc['name']}' failed modular preflight: {errors}")
+                        guard = SafetyGuard.from_mapping(merged_tc.get("safety_guard", {}))
+                        if guard.manual_confirm_required and not self.authorized:
+                            raise ConfigError(
+                                f"testcase '{merged_tc['name']}' requires manual confirmation; use --yes-i-am-authorized or safety.authorized=true"
+                            )
                     native_cases.append((target, merged_tc))
             if native_cases:
                 can_mod, bus = open_bus(self.can_cfg)
@@ -288,13 +299,19 @@ class Runner:
         self.run_logger.clear_testcase_context()
         return 0
 
-    def _modular_placeholder_preview(self, tc: Mapping[str, Any], target: TargetConfig | None) -> str:
+    def _modular_preview(self, tc: Mapping[str, Any], target: TargetConfig | None) -> str:
         runner = make_modular_runner(_modular_runner_kind(tc))
         case_model = normalize_case_model(tc)
         safety_guard = SafetyGuard.from_mapping(tc.get("safety_guard", {}))
-        parameters = dict(tc.get("parameters") or {})
+        parameters = _modular_parameters(tc)
         target_note = f"target={target.name}" if target else "target=<not configured>"
         return f"  [{test_id_label(tc)}] {target_note}\n" + runner.dry_run_preview(case_model, parameters, safety_guard)
+
+    def _preflight_modular_case(self, tc: Mapping[str, Any]) -> dict[str, str]:
+        runner = make_modular_runner(_modular_runner_kind(tc))
+        case_model = normalize_case_model(tc)
+        safety_guard = SafetyGuard.from_mapping(tc.get("safety_guard", {}))
+        return runner.validate(case_model, _modular_parameters(tc), safety_guard)
 
     def _dry_run_access_control_probe(self, tc: Mapping[str, Any]) -> list[str]:
         from .utils import parse_byte, parse_hex_bytes, spaced
@@ -346,6 +363,10 @@ def _criteria_text(value: Any) -> str:
 
 
 def _is_modular_placeholder(tc: Mapping[str, Any]) -> bool:
+    return _is_modular_case(tc) and not bool(tc.get("implemented", False))
+
+
+def _is_modular_case(tc: Mapping[str, Any]) -> bool:
     return str(tc.get("type") or "") in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}
 
 
@@ -354,3 +375,22 @@ def _modular_runner_kind(tc: Mapping[str, Any]) -> str:
     if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
         return case_type
     return "diagnostic_service"
+
+
+def _modular_parameters(tc: Mapping[str, Any]) -> dict[str, Any]:
+    parameters = dict(tc.get("parameters") or {})
+    for key in (
+        "session_flow",
+        "service_id",
+        "subfunction",
+        "raw_payload_override",
+        "advanced_raw_payload_override_enabled",
+        "authorization_state_note",
+        "diagnostic_observation_note",
+        "physical_observation_note",
+        "dtc_update_effect_confirmed",
+        "analyst_note",
+    ):
+        if key in tc:
+            parameters[key] = tc[key]
+    return parameters
