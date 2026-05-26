@@ -1974,6 +1974,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             model.expected_behavior,
             "",
             f"Runner interface: {runner_label}",
+            "Warning: this test may erase diagnostic evidence / DTC records. Manual confirmation is required." if model.safety_level == "destructive-diagnostic" else "",
             "Execution status: implemented controlled diagnostic request." if case_def.implemented else "Execution status: placeholder only. No CAN frame is transmitted for this case yet.",
         ]).strip()
         tests.append(TestDefinition(
@@ -1988,7 +1989,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             reference_source="Section 11 UDS-26..32 modular framework placeholder",
             safety_level=model.safety_level,
             target_required=True,
-            disruptive=False,
+            disruptive=(model.safety_level == "destructive-diagnostic"),
             validate=validate_modular_case(case_def),
             evidence_fields=tuple(model.evidence_fields),
             summary_template="modular_placeholder_report",
@@ -2858,6 +2859,10 @@ class RunWorker(QThread):
             warning = "ControlDTCSetting may affect diagnostic evidence and logging behavior."
             self.log_line.emit(f"Safety note: {warning}")
             evidence.add_transcript(f"SAFETY: {warning}")
+        if case_model.service_id.lower() in {"0x14", "14"}:
+            warning = "ClearDiagnosticInformation may erase diagnostic evidence / DTC records. Manual confirmation is required."
+            self.log_line.emit(f"Safety note: {warning}")
+            evidence.add_transcript(f"SAFETY: {warning}")
         evidence.add_transcript("ASSERTION No SecurityAccess seed/key exchange is performed by this runner before the tested request.")
 
         client = self._open_uds_client()
@@ -2887,6 +2892,8 @@ class RunWorker(QThread):
                 selected_subfunction=runner.selected_subfunction(payload),
                 suppress_positive_response_requested=suppress_positive,
                 selected_subfunction_meaning=subfunction_meaning,
+                selected_group_of_dtc=runner.selected_group_of_dtc(payload),
+                group_of_dtc_meaning=runner.group_of_dtc_meaning(payload),
                 evidence=evidence,
             )
             return session_failure
@@ -2910,6 +2917,7 @@ class RunWorker(QThread):
             error=exchange.error,
             parameters=self.params,
             suppress_positive_response_requested=suppress_positive,
+            service_id=payload[0] if payload else None,
         )
         summary = self._base_summary(evidence)
         summary.update({
@@ -2922,6 +2930,8 @@ class RunWorker(QThread):
             "nrc": obs.get("nrc", ""),
             "nrc_meaning": obs.get("nrc_meaning", ""),
             "suppress_positive_response_requested": suppress_positive,
+            "selected_group_of_dtc": runner.selected_group_of_dtc(payload),
+            "group_of_dtc_meaning": runner.group_of_dtc_meaning(payload),
             "verdict": result.verdict,
             "rationale": result.rationale,
             "observations": observations,
@@ -2930,8 +2940,11 @@ class RunWorker(QThread):
             "selected_subfunction_meaning": subfunction_meaning,
             "raw_payload_override": str(self.params.get("raw_payload_override") or ""),
             "authorization_state_note": str(self.params.get("authorization_state_note") or ""),
+            "dtc_state_before_note": str(self.params.get("dtc_state_before_note") or ""),
+            "dtc_state_after_note": str(self.params.get("dtc_state_after_note") or ""),
             "diagnostic_observation_note": str(self.params.get("diagnostic_observation_note") or ""),
             "dtc_update_effect_confirmed": str(self.params.get("dtc_update_effect_confirmed") or "unknown"),
+            "dtc_clear_effect_confirmed": str(self.params.get("dtc_clear_effect_confirmed") or "unknown"),
             "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
             "analyst_note": str(self.params.get("analyst_note") or ""),
         })
@@ -2946,6 +2959,8 @@ class RunWorker(QThread):
             selected_subfunction=runner.selected_subfunction(payload),
             suppress_positive_response_requested=suppress_positive,
             selected_subfunction_meaning=subfunction_meaning,
+            selected_group_of_dtc=runner.selected_group_of_dtc(payload),
+            group_of_dtc_meaning=runner.group_of_dtc_meaning(payload),
             evidence=evidence,
         )
         return summary
@@ -2964,6 +2979,8 @@ class RunWorker(QThread):
         selected_subfunction: str = "",
         suppress_positive_response_requested: bool = False,
         selected_subfunction_meaning: str = "",
+        selected_group_of_dtc: str = "",
+        group_of_dtc_meaning: str = "",
     ) -> dict[str, Any]:
         return build_evidence_record(
             display_id=self.test.display_id or self.test.id.upper(),
@@ -2973,6 +2990,8 @@ class RunWorker(QThread):
             selected_subfunction=selected_subfunction or str(self.params.get("subfunction") or ""),
             selected_subfunction_meaning=selected_subfunction_meaning,
             suppress_positive_response_requested=suppress_positive_response_requested,
+            selected_group_of_dtc=selected_group_of_dtc,
+            group_of_dtc_meaning=group_of_dtc_meaning,
             raw_payload_override=str(self.params.get("raw_payload_override") or ""),
             request_payload=request_payload,
             response_payload=response_payload,
@@ -2981,8 +3000,11 @@ class RunWorker(QThread):
             nrc=nrc,
             timeout_or_no_response=timeout_or_no_response,
             authorization_state_note=str(self.params.get("authorization_state_note") or ""),
+            dtc_state_before_note=str(self.params.get("dtc_state_before_note") or ""),
+            dtc_state_after_note=str(self.params.get("dtc_state_after_note") or ""),
             diagnostic_observation_note=str(self.params.get("diagnostic_observation_note") or ""),
             dtc_update_effect_confirmed=str(self.params.get("dtc_update_effect_confirmed") or "unknown"),
+            dtc_clear_effect_confirmed=str(self.params.get("dtc_clear_effect_confirmed") or "unknown"),
             physical_observation_note=str(self.params.get("physical_observation_note") or ""),
             analyst_note=str(self.params.get("analyst_note") or ""),
             verdict=verdict,
@@ -3022,12 +3044,16 @@ class RunWorker(QThread):
             suppress_positive = False
             subfunction_meaning = ""
             selected_subfunction = ""
+            selected_group_of_dtc = ""
+            group_of_dtc_meaning = ""
             try:
                 payload_bytes = runner.build_payload(case_model, self.params)
                 request_payload = spaced(payload_bytes)
                 selected_subfunction = runner.selected_subfunction(payload_bytes)
                 suppress_positive = runner.suppress_positive_response_requested(payload_bytes)
                 subfunction_meaning = runner.selected_subfunction_meaning(payload_bytes)
+                selected_group_of_dtc = runner.selected_group_of_dtc(payload_bytes)
+                group_of_dtc_meaning = runner.group_of_dtc_meaning(payload_bytes)
             except ValueError as exc:
                 request_payload = f"<invalid: {exc}>"
             summary["execution_steps"] = plan.get("steps", [])
@@ -3035,10 +3061,15 @@ class RunWorker(QThread):
             summary["selected_subfunction"] = selected_subfunction or str(self.params.get("subfunction") or "")
             summary["selected_subfunction_meaning"] = subfunction_meaning
             summary["suppress_positive_response_requested"] = suppress_positive
+            summary["selected_group_of_dtc"] = selected_group_of_dtc
+            summary["group_of_dtc_meaning"] = group_of_dtc_meaning
             summary["raw_payload_override"] = str(self.params.get("raw_payload_override") or "")
             summary["authorization_state_note"] = str(self.params.get("authorization_state_note") or "")
+            summary["dtc_state_before_note"] = str(self.params.get("dtc_state_before_note") or "")
+            summary["dtc_state_after_note"] = str(self.params.get("dtc_state_after_note") or "")
             summary["diagnostic_observation_note"] = str(self.params.get("diagnostic_observation_note") or "")
             summary["dtc_update_effect_confirmed"] = str(self.params.get("dtc_update_effect_confirmed") or "unknown")
+            summary["dtc_clear_effect_confirmed"] = str(self.params.get("dtc_clear_effect_confirmed") or "unknown")
             summary["physical_observation_note"] = str(self.params.get("physical_observation_note") or "")
             summary["analyst_note"] = str(self.params.get("analyst_note") or "")
             summary["evidence_record"] = self._diagnostic_service_evidence_record(
@@ -3052,6 +3083,8 @@ class RunWorker(QThread):
                 selected_subfunction=selected_subfunction,
                 suppress_positive_response_requested=suppress_positive,
                 selected_subfunction_meaning=subfunction_meaning,
+                selected_group_of_dtc=selected_group_of_dtc,
+                group_of_dtc_meaning=group_of_dtc_meaning,
                 evidence=evidence,
             )
         elif self.test.id in {"uds_23", "uds_24"}:
@@ -5011,6 +5044,13 @@ def run_self_checks() -> None:
             assert subfunction_field.default == "0x01"
             assert reg_entry.display_id == "UDS-26"
             assert reg_entry.canonical_id == "uds26_unauthenticated_control_dtc_setting"
+        elif test_id == "uds_27":
+            assert reg_entry.runner_kind == "diagnostic_service"
+            group_field = next(field for field in reg_entry.fields if field.id == "group_of_dtc_preset")
+            assert [choice.value for choice in group_field.choices] == ["all", "custom"]
+            assert reg_entry.display_id == "UDS-27"
+            assert reg_entry.canonical_id == "uds27_unauthenticated_clear_diagnostic_information"
+            assert reg_entry.disruptive
         else:
             assert reg_entry.runner_kind == "modular_stub"
         assert reg_entry.category == "UDS-26..32 Framework"
@@ -5125,6 +5165,28 @@ def run_self_checks() -> None:
         suppress_positive_response_requested=True,
     )
     assert suppress_result.verdict == "OBSERVATION"
+    uds27_case_model = normalize_case_model(registry["uds_27"].case_model)
+    uds27_params = default_params_for_test(registry["uds_27"])
+    assert spaced(uds26_runner.build_payload(uds27_case_model, uds27_params)) == "14 FF FF FF"
+    assert uds26_runner.selected_group_of_dtc(uds26_runner.build_payload(uds27_case_model, uds27_params)) == "FF FF FF"
+    raw_uds27_errors = uds26_runner.validate(
+        uds27_case_model,
+        uds27_params | {"raw_payload_override": "14 FF FF FF FF", "advanced_raw_payload_override_enabled": False},
+        SafetyGuard.from_mapping(registry["uds_27"].safety_guard),
+    )
+    assert "requires advanced_raw_payload_override_enabled=true" in raw_uds27_errors["request_payload"]
+    raw_uds27_advanced = uds26_runner.validate(
+        uds27_case_model,
+        uds27_params | {"raw_payload_override": "14 FF FF FF FF", "advanced_raw_payload_override_enabled": True},
+        SafetyGuard.from_mapping(registry["uds_27"].safety_guard),
+    )
+    assert raw_uds27_advanced == {}
+    group_errors = uds26_runner.validate(
+        uds27_case_model,
+        uds27_params | {"group_of_dtc_preset": "custom", "group_of_dtc": "FF FF"},
+        SafetyGuard.from_mapping(registry["uds_27"].safety_guard),
+    )
+    assert "exactly 3 bytes" in group_errors["request_payload"]
     uds26_dir = Path(tempfile.mkdtemp())
     uds26_target = mk_target(dry_run=True, authorized=False, output_dir=uds26_dir)
     uds26_test = registry["uds_26"]
@@ -5141,9 +5203,23 @@ def run_self_checks() -> None:
     assert uds26_summary["evidence_record"]["selected_subfunction_meaning"] == "enable DTC setting"
     assert uds26_summary["evidence_record"]["suppress_positive_response_requested"] is False
     assert uds26_summary["verdict"] == "DRY_RUN / NOT_EXECUTED"
+    uds27_dir = Path(tempfile.mkdtemp())
+    uds27_target = mk_target(dry_run=True, authorized=False, output_dir=uds27_dir)
+    uds27_test = registry["uds_27"]
+    uds27_worker = RunWorker(uds27_test, uds27_target, uds27_params, "")
+    uds27_worker.run()
+    assert uds27_worker._process is None
+    assert uds27_worker._opened_buses == []
+    uds27_run_dir = next(uds27_dir.iterdir())
+    uds27_summary = json.loads((uds27_run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert uds27_summary["request_hex"] == "14 FF FF FF"
+    assert uds27_summary["display_id"] == "UDS-27"
+    assert uds27_summary["canonical_id"] == "uds27_unauthenticated_clear_diagnostic_information"
+    assert uds27_summary["evidence_record"]["selected_group_of_dtc"] == "FF FF FF"
+    assert uds27_summary["evidence_record"]["group_of_dtc_meaning"] == "all DTC groups"
     placeholder_dir = Path(tempfile.mkdtemp())
     placeholder_target = mk_target(dry_run=False, authorized=False, output_dir=placeholder_dir)
-    placeholder_test = registry["uds_27"]
+    placeholder_test = registry["uds_28"]
     placeholder_params = default_params_for_test(placeholder_test)
     placeholder_worker = RunWorker(placeholder_test, placeholder_target, placeholder_params, "")
     placeholder_worker.run()

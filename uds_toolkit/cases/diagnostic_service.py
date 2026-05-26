@@ -38,7 +38,7 @@ class DiagnosticServiceCase:
                 record_result(ctx, step, result)
             if not ok:
                 verdict = "INCONCLUSIVE"
-                rationale = "Session flow did not complete positively; ControlDTCSetting request was not sent."
+                rationale = "Session flow did not complete positively; diagnostic service request was not sent."
                 ctx.run_logger.event(
                     "diagnostic_service_evidence",
                     testcase=ctx.name,
@@ -62,7 +62,10 @@ class DiagnosticServiceCase:
         payload = runner.build_payload(case, parameters)
         suppress_positive = runner.suppress_positive_response_requested(payload)
         subfunction_meaning = runner.selected_subfunction_meaning(payload)
-        result = client.request(payload, step="control_dtc_setting", frame_label="ControlDTCSetting")
+        group_of_dtc = runner.selected_group_of_dtc(payload)
+        group_meaning = runner.group_of_dtc_meaning(payload)
+        step_name = _step_name(payload)
+        result = client.request(payload, step=step_name, frame_label=_frame_label(payload))
         verdict_result = runner.classify_response(
             positive=result.positive,
             negative=result.nrc is not None,
@@ -71,11 +74,12 @@ class DiagnosticServiceCase:
             error=result.exception,
             parameters=parameters,
             suppress_positive_response_requested=suppress_positive,
+            service_id=payload[0] if payload else None,
         )
         ctx.run_logger.result(
             testcase=ctx.name,
             target=ctx.target.name,
-            step="control_dtc_setting",
+            step=step_name,
             request=result.request,
             response=result.response,
             status=result.status,
@@ -102,6 +106,8 @@ class DiagnosticServiceCase:
                 suppress_positive_response_requested=suppress_positive,
                 selected_subfunction=runner.selected_subfunction(payload),
                 selected_subfunction_meaning=subfunction_meaning,
+                selected_group_of_dtc=group_of_dtc,
+                group_of_dtc_meaning=group_meaning,
                 verdict=verdict_result.verdict,
             ),
         )
@@ -114,12 +120,17 @@ def _parameters(raw_config: dict[str, Any]) -> dict[str, Any]:
         "session_flow",
         "service_id",
         "subfunction",
+        "group_of_dtc_preset",
+        "group_of_dtc",
         "raw_payload_override",
         "advanced_raw_payload_override_enabled",
         "authorization_state_note",
+        "dtc_state_before_note",
+        "dtc_state_after_note",
         "diagnostic_observation_note",
         "physical_observation_note",
         "dtc_update_effect_confirmed",
+        "dtc_clear_effect_confirmed",
         "analyst_note",
     ):
         if key in raw_config:
@@ -148,6 +159,22 @@ def _response_type(result: UdsResult) -> str:
     return "ambiguous_response"
 
 
+def _step_name(payload: bytes) -> str:
+    if payload and payload[0] == 0x14:
+        return "clear_diagnostic_information"
+    if payload and payload[0] == 0x85:
+        return "control_dtc_setting"
+    return "diagnostic_service"
+
+
+def _frame_label(payload: bytes) -> str:
+    if payload and payload[0] == 0x14:
+        return "ClearDiagnosticInformation"
+    if payload and payload[0] == 0x85:
+        return "ControlDTCSetting"
+    return "DiagnosticService"
+
+
 def _evidence_record(
     ctx: CaseContext,
     parameters: dict[str, Any],
@@ -162,6 +189,8 @@ def _evidence_record(
     selected_subfunction: str = "",
     suppress_positive_response_requested: bool = False,
     selected_subfunction_meaning: str = "",
+    selected_group_of_dtc: str = "",
+    group_of_dtc_meaning: str = "",
 ) -> dict[str, Any]:
     return build_evidence_record(
         display_id=str(ctx.raw_config.get("display_id") or ctx.raw_config.get("test_id") or ""),
@@ -171,6 +200,8 @@ def _evidence_record(
         selected_subfunction=selected_subfunction or str(parameters.get("subfunction") or ""),
         selected_subfunction_meaning=selected_subfunction_meaning,
         suppress_positive_response_requested=suppress_positive_response_requested,
+        selected_group_of_dtc=selected_group_of_dtc,
+        group_of_dtc_meaning=group_of_dtc_meaning,
         raw_payload_override=str(parameters.get("raw_payload_override") or ""),
         request_payload=request_payload,
         response_payload=response_payload,
@@ -179,8 +210,11 @@ def _evidence_record(
         nrc=nrc,
         timeout_or_no_response=timeout_or_no_response,
         authorization_state_note=str(parameters.get("authorization_state_note") or ""),
+        dtc_state_before_note=str(parameters.get("dtc_state_before_note") or ""),
+        dtc_state_after_note=str(parameters.get("dtc_state_after_note") or ""),
         diagnostic_observation_note=str(parameters.get("diagnostic_observation_note") or ""),
         dtc_update_effect_confirmed=str(parameters.get("dtc_update_effect_confirmed") or "unknown"),
+        dtc_clear_effect_confirmed=str(parameters.get("dtc_clear_effect_confirmed") or "unknown"),
         physical_observation_note=str(parameters.get("physical_observation_note") or ""),
         analyst_note=str(parameters.get("analyst_note") or ""),
         verdict=verdict,

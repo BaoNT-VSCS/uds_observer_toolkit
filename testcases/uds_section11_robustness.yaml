@@ -151,15 +151,186 @@ testcases:
       - verdict
       - raw_log_path
 
-  - name: uds27_diagnostic_service_placeholder
+  - name: uds27_unauthenticated_clear_diagnostic_information
     type: diagnostic_service
     case_id: uds_27
     test_id: UDS-27
-    title: UDS-27 Diagnostic Service Placeholder
+    display_id: UDS-27
+    canonical_id: uds27_unauthenticated_clear_diagnostic_information
+    title: UDS-27 Unauthenticated Clear Diagnostic Information
+    description: Check whether UDS service 0x14 ClearDiagnosticInformation is accepted without proper authorization/security access.
     category: UDS-26..32 Framework
-    risk_property: Future diagnostic-service validation for UDS-27.
+    case_family: diagnostic_service
+    risk_property: diagnostic integrity / evidence integrity
+    service_id: "0x14"
+    default_payload: "14 FF FF FF"
+    implemented: true
+    destructive_or_disruptive: true
+    requires_manual_confirmation: true
+    supported_group_of_dtc_presets:
+      "FF FF FF": "all DTC groups"
+      custom: "manual 3-byte groupOfDTC"
+      raw_payload_override: "advanced raw payload override"
+    parameters:
+      session_flow: "03"
+      group_of_dtc_preset: "all"
+      group_of_dtc: "FF FF FF"
+      raw_payload_override: ""
+      advanced_raw_payload_override_enabled: false
+      authorization_state_note: "No SecurityAccess seed/key exchange performed by this test."
+      dtc_state_before_note: ""
+      dtc_state_after_note: ""
+      dtc_clear_effect_confirmed: "unknown"
+      diagnostic_observation_note: ""
+      physical_observation_note: ""
+      analyst_note: ""
+    ui_parameters:
+      - key: session_flow
+        label: Diagnostic session flow
+        kind: textarea
+        default: "03"
+        help: "Subfunctions only: 03 or 03 02."
+      - key: group_of_dtc_preset
+        label: groupOfDTC preset
+        kind: combo
+        default: "all"
+        required: true
+        choices:
+          - label: "14 FF FF FF - clear all DTC groups"
+            value: "all"
+          - label: "custom 3-byte groupOfDTC"
+            value: "custom"
+      - key: group_of_dtc
+        label: Manual groupOfDTC
+        kind: textarea
+        default: "FF FF FF"
+        help: "Exactly 3 bytes. Used when groupOfDTC preset is custom."
+      - key: raw_payload_override
+        label: Raw payload override
+        kind: textarea
+        default: ""
+        help: "Advanced only. Normal UDS-27 request is 14 plus exactly 3 groupOfDTC bytes."
+      - key: advanced_raw_payload_override_enabled
+        label: Advanced raw override
+        kind: checkbox
+        default: false
+        help: "Required for raw payload override. Allows manual lab payloads such as 14 FF FF FF FF."
+      - key: authorization_state_note
+        label: Authorization/security state note
+        kind: textarea
+        default: "No SecurityAccess seed/key exchange performed by this test."
+        help: Describe active session/security state before interpreting positive responses.
+      - key: dtc_state_before_note
+        label: DTC state before note
+        kind: textarea
+        default: ""
+        help: Manual DTC/evidence state before ClearDiagnosticInformation.
+      - key: dtc_state_after_note
+        label: DTC state after note
+        kind: textarea
+        default: ""
+        help: Manual DTC/evidence state after ClearDiagnosticInformation.
+      - key: dtc_clear_effect_confirmed
+        label: DTC clear effect confirmed
+        kind: combo
+        default: "unknown"
+        choices:
+          - label: "unknown"
+            value: "unknown"
+          - label: "true"
+            value: "true"
+          - label: "false"
+            value: "false"
+      - key: diagnostic_observation_note
+        label: Diagnostic observation note
+        kind: textarea
+        default: ""
+        help: Note DTC/logging behavior observed outside the UDS response.
+      - key: physical_observation_note
+        label: Physical observation note
+        kind: textarea
+        default: ""
+        help: Optional physical or bench observation.
+      - key: analyst_note
+        label: Analyst note
+        kind: textarea
+        default: ""
+        help: Manual reviewer note for report context.
+      - key: max_duration_seconds
+        label: Max duration seconds
+        kind: text
+        default: "10.0"
+        required: true
+      - key: max_frame_rate
+        label: Max frame rate
+        kind: text
+        default: "2.0"
+        required: true
+      - key: tester_present_enabled
+        label: TesterPresent enabled
+        kind: checkbox
+        default: false
+      - key: tester_present_interval_seconds
+        label: TesterPresent interval seconds
+        kind: text
+        default: "2.0"
+        required: true
+    preconditions:
+      - Bench/simulator mode is required.
+      - Manual confirmation is required before execution.
+      - Operator must understand that ClearDiagnosticInformation may erase DTC records and diagnostic evidence.
+      - This test does not perform SecurityAccess seed/key exchange before ClearDiagnosticInformation.
+      - Single-shot execution only; no flood behavior.
+    safety_level: destructive-diagnostic
+    safety_warning: This test may erase diagnostic evidence / DTC records. Manual confirmation is required.
+    safety_guard:
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 10.0
+      max_frame_rate: 2.0
+      stop_button_required: true
+      stop_on_bus_error: true
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: ECU should not allow unauthorized ClearDiagnosticInformation in a restricted state.
+    pass_criteria:
+      - ECU rejects ClearDiagnosticInformation in the tested unauthorized state with a valid negative response or otherwise does not allow DTC clearing.
+    fail_criteria:
+      - ECU accepts 0x14 without SecurityAccess/authorization in a state where ClearDiagnosticInformation should be restricted.
+    evidence_fields:
+      - timestamp
+      - display_id
+      - canonical_id
+      - target_profile
+      - session_flow
+      - selected_group_of_dtc
+      - group_of_dtc_meaning
+      - raw_payload_override
+      - request_payload
+      - response_payload
+      - response_classification
+      - positive_response
+      - nrc
+      - timeout_or_no_response
+      - authorization_state_note
+      - dtc_state_before_note
+      - dtc_state_after_note
+      - dtc_clear_effect_confirmed
+      - diagnostic_observation_note
+      - physical_observation_note
+      - analyst_note
+      - verdict
+      - raw_log_path
+
+  - name: uds28_flood_placeholder
+    type: flood
+    case_id: uds_28
+    test_id: UDS-28
+    title: UDS-28 Flood Behavior Placeholder
+    category: UDS-26..32 Framework
+    risk_property: Future bounded flood/rate behavior validation for UDS-28.
     service_id: ""
-    default_payload: "<service> <payload>"
+    default_payload: "<payload repeated under guard limits>"
     parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
     ui_parameters: &future_ui_parameters
       - key: session_flow
@@ -229,25 +400,6 @@ testcases:
       - physical_observation_note
       - verdict
       - raw_log_path
-
-  - name: uds28_flood_placeholder
-    type: flood
-    case_id: uds_28
-    test_id: UDS-28
-    title: UDS-28 Flood Behavior Placeholder
-    category: UDS-26..32 Framework
-    risk_property: Future bounded flood/rate behavior validation for UDS-28.
-    service_id: ""
-    default_payload: "<payload repeated under guard limits>"
-    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: *future_ui_parameters
-    preconditions: *future_preconditions
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Case definition is visible and reviewable; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: *future_evidence_fields
 
   - name: uds29_flood_placeholder
     type: flood

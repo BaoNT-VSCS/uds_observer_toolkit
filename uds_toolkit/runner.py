@@ -383,12 +383,17 @@ def _modular_parameters(tc: Mapping[str, Any]) -> dict[str, Any]:
         "session_flow",
         "service_id",
         "subfunction",
+        "group_of_dtc_preset",
+        "group_of_dtc",
         "raw_payload_override",
         "advanced_raw_payload_override_enabled",
         "authorization_state_note",
+        "dtc_state_before_note",
+        "dtc_state_after_note",
         "diagnostic_observation_note",
         "physical_observation_note",
         "dtc_update_effect_confirmed",
+        "dtc_clear_effect_confirmed",
         "analyst_note",
     ):
         if key in tc:

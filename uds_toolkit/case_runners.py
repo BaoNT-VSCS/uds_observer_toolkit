@@ -118,10 +118,14 @@ class DiagnosticServiceRunner(_StubRunner):
         except ValueError as exc:
             errors["request_payload"] = str(exc)
         else:
+            raw_override = str(parameters.get("raw_payload_override") or "").strip()
+            advanced_override = bool(parameters.get("advanced_raw_payload_override_enabled", False))
             if not payload:
                 errors["request_payload"] = "diagnostic request payload is required"
             elif len(payload) < 2 and case.service_id.lower() in {"0x85", "85"}:
                 errors["subfunction"] = "ControlDTCSetting requires a subfunction byte"
+            elif self._service_id(case, parameters, payload[0]) == 0x14 and len(payload) != 4 and not (raw_override and advanced_override):
+                errors["group_of_dtc"] = "ClearDiagnosticInformation requires service 0x14 plus exactly 3 groupOfDTC bytes"
         return errors
 
     def dry_run_preview(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
@@ -131,11 +135,15 @@ class DiagnosticServiceRunner(_StubRunner):
         payload = ""
         meaning = ""
         suppress = False
+        group_of_dtc = ""
+        group_meaning = ""
         try:
             payload_bytes = self.build_payload(case, parameters)
             payload = spaced(payload_bytes)
             meaning = self.selected_subfunction_meaning(payload_bytes)
             suppress = self.suppress_positive_response_requested(payload_bytes)
+            group_of_dtc = self.selected_group_of_dtc(payload_bytes)
+            group_meaning = self.group_of_dtc_meaning(payload_bytes)
         except ValueError as exc:
             payload = f"<invalid: {exc}>"
         session_flow = str(parameters.get("session_flow") or "")
@@ -146,12 +154,19 @@ class DiagnosticServiceRunner(_StubRunner):
             f"Implemented: {plan.implemented}",
             f"Session flow: {session_flow or '<none>'}",
             f"Selected payload: {payload}",
-            f"Selected subfunction meaning: {meaning or '<unknown>'}",
+            f"Selected subfunction meaning: {meaning or '<not applicable>'}",
             f"Suppress positive response requested: {suppress}",
+            f"groupOfDTC: {group_of_dtc or '<not applicable>'}",
+            f"groupOfDTC meaning: {group_meaning or '<not applicable>'}",
             f"Safety guard: {safety_guard.as_dict()}",
         ]
         if self._disable_dtc_setting_requested(parameters):
             lines.append("Warning: 0x85 0x02 may suppress diagnostic trouble code updates; confirm diagnostic effect manually.")
+        if self._clear_diagnostic_information_requested(case, parameters):
+            lines.append("Warning: this test may erase diagnostic evidence / DTC records. Manual confirmation is required for non-dry execution.")
+        raw_warning = self.raw_payload_format_warning(case, parameters)
+        if raw_warning:
+            lines.append(f"Warning: {raw_warning}")
         return "\n".join(lines)
 
     def plan(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerPlan:
@@ -176,6 +191,8 @@ class DiagnosticServiceRunner(_StubRunner):
             "payload": spaced(payload),
             "selected_subfunction_meaning": self.selected_subfunction_meaning(payload),
             "suppress_positive_response_requested": self.suppress_positive_response_requested(payload),
+            "selected_group_of_dtc": self.selected_group_of_dtc(payload),
+            "group_of_dtc_meaning": self.group_of_dtc_meaning(payload),
             "note": "Single controlled diagnostic request; no flood or repeated transmission.",
         })
         return RunnerPlan(
@@ -211,11 +228,15 @@ class DiagnosticServiceRunner(_StubRunner):
                 raise ValueError("raw payload override is empty")
             service = self._service_id(case, parameters, payload[0])
             advanced_override = bool(parameters.get("advanced_raw_payload_override_enabled", False))
+            if service == 0x14 and not advanced_override:
+                raise ValueError("UDS-27 raw payload override requires advanced_raw_payload_override_enabled=true")
             if payload[0] != service and not advanced_override:
                 raise ValueError(f"raw payload override must start with service 0x{service:02X}")
             return payload
 
         service = self._service_id(case, parameters, None)
+        if service == 0x14:
+            return bytes([service]) + self._group_of_dtc(parameters, case.default_payload)
         subfunction_value = parameters.get("subfunction")
         if subfunction_value in (None, ""):
             default_payload = parse_hex_bytes(case.default_payload)
@@ -235,6 +256,7 @@ class DiagnosticServiceRunner(_StubRunner):
         error: str = "",
         parameters: dict[str, Any] | None = None,
         suppress_positive_response_requested: bool = False,
+        service_id: int | None = None,
     ) -> RunnerResult:
         parameters = parameters or {}
         if response_type in {"timeout", "no_response"}:
@@ -258,10 +280,21 @@ class DiagnosticServiceRunner(_StubRunner):
             )
         if positive:
             auth_note = str(parameters.get("authorization_state_note") or "").lower()
-            dtc_effect = str(parameters.get("dtc_update_effect_confirmed") or "unknown").strip().lower()
+            dtc_update_effect = str(parameters.get("dtc_update_effect_confirmed") or "unknown").strip().lower()
+            dtc_clear_effect = str(parameters.get("dtc_clear_effect_confirmed") or "unknown").strip().lower()
             unauthorized_markers = ("no security", "without security", "unauth", "not authorized", "no seed", "no seed/key")
             if any(marker in auth_note for marker in unauthorized_markers):
-                if dtc_effect == "true":
+                if service_id == 0x14:
+                    if dtc_clear_effect == "true":
+                        return RunnerResult(
+                            "FINDING_CANDIDATE",
+                            "ECU accepted ClearDiagnosticInformation without documented authorization and DTC before/after notes indicate DTCs were cleared.",
+                        )
+                    return RunnerResult(
+                        "FINDING_CANDIDATE",
+                        "ECU accepted ClearDiagnosticInformation in a state documented as unauthenticated/unauthorized; DTC clear effect is not confirmed.",
+                    )
+                if dtc_update_effect == "true":
                     return RunnerResult(
                         "FINDING_CONFIRMED",
                         "ECU accepted ControlDTCSetting in an unauthenticated/unauthorized state and diagnostic evidence confirms DTC setting behavior changed.",
@@ -297,11 +330,11 @@ class DiagnosticServiceRunner(_StubRunner):
 
     @staticmethod
     def suppress_positive_response_requested(payload: bytes) -> bool:
-        return len(payload) >= 2 and bool(payload[1] & 0x80)
+        return len(payload) >= 2 and payload[0] == 0x85 and bool(payload[1] & 0x80)
 
     @staticmethod
     def selected_subfunction_meaning(payload: bytes) -> str:
-        if len(payload) < 2:
+        if len(payload) < 2 or payload[0] != 0x85:
             return ""
         subfunction = payload[1]
         base = subfunction & 0x7F
@@ -316,9 +349,37 @@ class DiagnosticServiceRunner(_StubRunner):
 
     @staticmethod
     def selected_subfunction(payload: bytes) -> str:
-        if len(payload) < 2:
+        if len(payload) < 2 or payload[0] != 0x85:
             return ""
         return f"0x{payload[1]:02X}"
+
+    @staticmethod
+    def selected_group_of_dtc(payload: bytes) -> str:
+        if len(payload) < 4 or payload[0] != 0x14:
+            return ""
+        return spaced(payload[1:4])
+
+    @staticmethod
+    def group_of_dtc_meaning(payload: bytes) -> str:
+        group = DiagnosticServiceRunner.selected_group_of_dtc(payload)
+        if not group:
+            return ""
+        if group == "FF FF FF":
+            return "all DTC groups"
+        return "custom groupOfDTC"
+
+    def raw_payload_format_warning(self, case: TestCaseModel, parameters: dict[str, Any]) -> str:
+        raw_override = str(parameters.get("raw_payload_override") or "").strip()
+        if not raw_override:
+            return ""
+        try:
+            payload = parse_hex_bytes(raw_override)
+            service = self._service_id(case, parameters, payload[0] if payload else None)
+        except ValueError as exc:
+            return str(exc)
+        if service == 0x14 and len(payload) != 4:
+            return "normal ClearDiagnosticInformation format is 14 plus exactly 3 groupOfDTC bytes"
+        return ""
 
     @staticmethod
     def _disable_dtc_setting_requested(parameters: dict[str, Any]) -> bool:
@@ -333,6 +394,34 @@ class DiagnosticServiceRunner(_StubRunner):
             return (parse_byte(parameters.get("subfunction", 0)) & 0x7F) == 0x02
         except ValueError:
             return False
+
+    @staticmethod
+    def _clear_diagnostic_information_requested(case: TestCaseModel, parameters: dict[str, Any]) -> bool:
+        try:
+            service = DiagnosticServiceRunner._service_id(case, parameters, None)
+        except ValueError:
+            return False
+        return service == 0x14
+
+    @staticmethod
+    def _group_of_dtc(parameters: dict[str, Any], default_payload: str) -> bytes:
+        preset = str(parameters.get("group_of_dtc_preset") or "all").strip()
+        if preset == "custom":
+            raw_group = parameters.get("group_of_dtc")
+            group = parse_hex_bytes(raw_group)
+            if len(group) != 3:
+                raise ValueError("manual groupOfDTC must be exactly 3 bytes")
+            return group
+        if preset in {"all", "all_dtc_groups", ""}:
+            return bytes([0xFF, 0xFF, 0xFF])
+        if preset == "default":
+            payload = parse_hex_bytes(default_payload)
+            if len(payload) == 4 and payload[0] == 0x14:
+                return payload[1:4]
+        group = parse_hex_bytes(preset)
+        if len(group) != 3:
+            raise ValueError("groupOfDTC preset must resolve to exactly 3 bytes")
+        return group
 
 
 class FloodRunner(_StubRunner):

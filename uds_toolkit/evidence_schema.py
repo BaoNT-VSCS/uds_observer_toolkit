@@ -14,6 +14,8 @@ EVIDENCE_SCHEMA_FIELDS = (
     "selected_subfunction",
     "selected_subfunction_meaning",
     "suppress_positive_response_requested",
+    "selected_group_of_dtc",
+    "group_of_dtc_meaning",
     "raw_payload_override",
     "request_payload",
     "response_payload",
@@ -22,8 +24,11 @@ EVIDENCE_SCHEMA_FIELDS = (
     "nrc",
     "timeout_or_no_response",
     "authorization_state_note",
+    "dtc_state_before_note",
+    "dtc_state_after_note",
     "diagnostic_observation_note",
     "dtc_update_effect_confirmed",
+    "dtc_clear_effect_confirmed",
     "physical_observation_note",
     "analyst_note",
     "verdict",
@@ -54,14 +59,19 @@ class EvidenceRecord:
     selected_subfunction: str = ""
     selected_subfunction_meaning: str = ""
     suppress_positive_response_requested: bool = False
+    selected_group_of_dtc: str = ""
+    group_of_dtc_meaning: str = ""
     raw_payload_override: str = ""
     response_classification: str = ""
     positive_response: bool = False
     nrc: str = ""
     timeout_or_no_response: bool = False
     authorization_state_note: str = ""
+    dtc_state_before_note: str = ""
+    dtc_state_after_note: str = ""
     diagnostic_observation_note: str = ""
     dtc_update_effect_confirmed: str = "unknown"
+    dtc_clear_effect_confirmed: str = "unknown"
     analyst_note: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -74,6 +84,8 @@ class EvidenceRecord:
             "selected_subfunction": self.selected_subfunction,
             "selected_subfunction_meaning": self.selected_subfunction_meaning,
             "suppress_positive_response_requested": self.suppress_positive_response_requested,
+            "selected_group_of_dtc": self.selected_group_of_dtc,
+            "group_of_dtc_meaning": self.group_of_dtc_meaning,
             "raw_payload_override": self.raw_payload_override,
             "request_payload": self.request_payload,
             "response_payload": self.response_payload,
@@ -82,8 +94,11 @@ class EvidenceRecord:
             "nrc": self.nrc,
             "timeout_or_no_response": self.timeout_or_no_response,
             "authorization_state_note": self.authorization_state_note,
+            "dtc_state_before_note": self.dtc_state_before_note,
+            "dtc_state_after_note": self.dtc_state_after_note,
             "diagnostic_observation_note": self.diagnostic_observation_note,
             "dtc_update_effect_confirmed": self.dtc_update_effect_confirmed,
+            "dtc_clear_effect_confirmed": self.dtc_clear_effect_confirmed,
             "physical_observation_note": self.physical_observation_note,
             "analyst_note": self.analyst_note,
             "verdict": self.verdict,
@@ -105,14 +120,19 @@ def build_evidence_record(
     selected_subfunction: str = "",
     selected_subfunction_meaning: str = "",
     suppress_positive_response_requested: bool = False,
+    selected_group_of_dtc: str = "",
+    group_of_dtc_meaning: str = "",
     raw_payload_override: str = "",
     response_classification: str = "",
     positive_response: bool = False,
     nrc: str = "",
     timeout_or_no_response: bool = False,
     authorization_state_note: str = "",
+    dtc_state_before_note: str = "",
+    dtc_state_after_note: str = "",
     diagnostic_observation_note: str = "",
     dtc_update_effect_confirmed: str = "unknown",
+    dtc_clear_effect_confirmed: str = "unknown",
     analyst_note: str = "",
 ) -> EvidenceRecord:
     return EvidenceRecord(
@@ -124,6 +144,8 @@ def build_evidence_record(
         selected_subfunction=selected_subfunction,
         selected_subfunction_meaning=selected_subfunction_meaning,
         suppress_positive_response_requested=suppress_positive_response_requested,
+        selected_group_of_dtc=selected_group_of_dtc,
+        group_of_dtc_meaning=group_of_dtc_meaning,
         raw_payload_override=raw_payload_override,
         request_payload=request_payload,
         response_payload=response_payload,
@@ -132,8 +154,11 @@ def build_evidence_record(
         nrc=nrc,
         timeout_or_no_response=timeout_or_no_response,
         authorization_state_note=authorization_state_note,
+        dtc_state_before_note=dtc_state_before_note,
+        dtc_state_after_note=dtc_state_after_note,
         diagnostic_observation_note=diagnostic_observation_note,
         dtc_update_effect_confirmed=dtc_update_effect_confirmed,
+        dtc_clear_effect_confirmed=dtc_clear_effect_confirmed,
         physical_observation_note=physical_observation_note,
         analyst_note=analyst_note,
         verdict=verdict,
