@@ -2340,9 +2340,10 @@ SECTION11_ADVANCED_FIELD_IDS = {
         "seed_pattern_config",
         "response_expectation_notes",
     },
-    "uds_29": {"raw_payload_override", *SAFETY_TUNING_FIELD_IDS},
-    "uds_30": {"raw_payload_override", *SAFETY_TUNING_FIELD_IDS},
-    "uds_31": {"manual_service_id", "manual_pattern_hex", "enable_advanced_memory_service", *SAFETY_TUNING_FIELD_IDS},
+    "uds_29": {"raw_payload_override", "advanced_raw_payload_override_enabled", *SAFETY_TUNING_FIELD_IDS},
+    "uds_30": {"raw_payload_override", "advanced_raw_payload_override_enabled", "recovery_delay_seconds", *SAFETY_TUNING_FIELD_IDS},
+    "uds_31": {"manual_service_id", "manual_payload_prefix", "manual_pattern_hex", "enable_advanced_memory_service", "random_seed", "attempt_count", "recovery_delay_seconds", *SAFETY_TUNING_FIELD_IDS},
+    "uds_32": {"burst_size", "burst_interval_ms", "random_seed", "manual_payload", "high_rate_confirmation"},
 }
 
 SECTION11_EVIDENCE_FIELD_IDS = {
@@ -2371,7 +2372,9 @@ SECTION11_EVIDENCE_FIELD_IDS = {
         "recovery_note",
         "analyst_note",
     },
-    "uds_30": {"ecu_downtime_recovery_note", "physical_interruption_note", "analyst_note"},
+    "uds_30": {"ecu_downtime_recovery_note", "physical_interruption_note", "diagnostic_observation_note", "analyst_note"},
+    "uds_31": {"baseline_response_note", "crash_or_reset_observed", "recovery_note", "physical_observation_note", "analyst_note"},
+    "uds_32": {"physical_observation_note", "bus_starvation_observation", "recovery_note", "analyst_note"},
 }
 
 
@@ -2498,6 +2501,7 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
                 ("controlled driving test", "controlled driving test"),
             ])),
             FieldSpec("raw_payload_override", "Raw/manual payload override", "textarea", "", False),
+            FieldSpec("advanced_raw_payload_override_enabled", "Allow non-standard raw payload", "checkbox", False),
             FieldSpec("authorization_state_note", "Authorization/security note", "textarea", "", False),
             FieldSpec("communication_disruption_observed", "Communication disruption observed", "combo", "unknown", False, choices=_section11_choices([("unknown", "unknown"), ("true", "true"), ("false", "false")])),
             FieldSpec("diagnostic_observation_note", "Diagnostic observation note", "textarea", "", False),
@@ -2527,9 +2531,12 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
                 ("controlled driving test", "controlled driving test"),
             ])),
             FieldSpec("raw_payload_override", "Raw/manual payload override", "textarea", "", False),
+            FieldSpec("advanced_raw_payload_override_enabled", "Allow non-standard raw payload", "checkbox", False),
             FieldSpec("ecu_downtime_recovery_note", "ECU downtime/recovery note", "textarea", "", False),
             FieldSpec("physical_interruption_note", "Physical interruption note", "textarea", "", False),
+            FieldSpec("diagnostic_observation_note", "Diagnostic observation note", "textarea", "", False),
             FieldSpec("analyst_note", "Analyst note", "textarea", "", False),
+            FieldSpec("recovery_delay_seconds", "Recovery delay seconds", "text", "2.0", False),
             FieldSpec("max_duration_seconds", "Max duration seconds", "text", "30.0", True),
             FieldSpec("max_frame_rate", "Max frame rate", "text", "10.0", True),
             FieldSpec("tester_present_enabled", "TesterPresent enabled", "checkbox", False),
@@ -2553,6 +2560,8 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
             FieldSpec("did_hex", "DID", "text", "0xF190", False, visible_if=lambda p: p.get("target_service") in {"0x2E", "0x2F", "0x2C"}),
             FieldSpec("routine_identifier", "routineIdentifier", "text", "0x0001", False, visible_if=lambda p: p.get("target_service") == "0x31"),
             FieldSpec("block_sequence_counter", "blockSequenceCounter", "text", "0x01", False, visible_if=lambda p: p.get("target_service") == "0x36"),
+            FieldSpec("data_format_identifier", "DFI", "text", "0x00", False, visible_if=lambda p: p.get("target_service") == "0x34"),
+            FieldSpec("address_length_format_identifier", "ALFI", "text", "0x44", False, visible_if=lambda p: p.get("target_service") in {"0x34", "0x3D"}),
             FieldSpec("payload_length", "Payload length", "text", "64", True),
             FieldSpec("payload_pattern", "Payload pattern", "combo", "random", True, choices=_section11_choices([
                 ("random", "random"),
@@ -2563,12 +2572,52 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
             ])),
             FieldSpec("isotp_enabled", "ISO-TP enabled", "checkbox", True),
             FieldSpec("manual_service_id", "Manual service ID", "text", "0x22", False, visible_if=lambda p: p.get("target_service") == "manual"),
+            FieldSpec("manual_payload_prefix", "Manual payload prefix", "textarea", "", False, visible_if=lambda p: p.get("target_service") == "manual"),
             FieldSpec("manual_pattern_hex", "Manual pattern", "textarea", "", False, visible_if=lambda p: p.get("payload_pattern") == "manual pattern"),
             FieldSpec("enable_advanced_memory_service", "Enable advanced memory service 0x3D", "checkbox", False, visible_if=lambda p: p.get("target_service") == "0x3D"),
+            FieldSpec("random_seed", "Random seed", "text", "", False),
+            FieldSpec("attempt_count", "Attempt count", "text", "1", False),
+            FieldSpec("baseline_response_note", "Baseline response note", "textarea", "", False),
+            FieldSpec("crash_or_reset_observed", "Crash/reset observed", "combo", "unknown", False, choices=_section11_choices([("unknown", "unknown"), ("true", "true"), ("false", "false")])),
+            FieldSpec("recovery_note", "Recovery note", "textarea", "", False),
+            FieldSpec("physical_observation_note", "Physical observation note", "textarea", "", False),
+            FieldSpec("analyst_note", "Analyst note", "textarea", "", False),
+            FieldSpec("recovery_delay_seconds", "Recovery delay seconds", "text", "2.0", False),
             FieldSpec("max_duration_seconds", "Max duration seconds", "text", "30.0", True),
             FieldSpec("max_frame_rate", "Max frame rate", "text", "10.0", True),
             FieldSpec("tester_present_enabled", "TesterPresent enabled", "checkbox", False),
             FieldSpec("tester_present_interval_seconds", "TesterPresent interval seconds", "text", "2.0", True),
+        )
+    if case_id == "uds_32":
+        return (
+            FieldSpec("can_id", "CAN ID", "text", "0x000", True),
+            FieldSpec("is_extended_id", "Extended CAN ID", "checkbox", False),
+            FieldSpec("payload_pattern", "Payload pattern", "combo", "00 00 00 00 00 00 00 00", True, choices=_section11_choices([
+                ("00 00 00 00 00 00 00 00", "00 00 00 00 00 00 00 00"),
+                ("FF FF FF FF FF FF FF FF", "FF FF FF FF FF FF FF FF"),
+                ("random", "random"),
+                ("incremental", "incremental"),
+                ("manual", "manual"),
+            ])),
+            FieldSpec("max_duration_seconds", "Duration seconds", "text", "10.0", True),
+            FieldSpec("send_rate_msgs_per_sec", "Send rate (messages/sec)", "text", "10.0", True),
+            FieldSpec("inter_frame_delay_ms", "Inter-frame delay (ms)", "text", "100", False, enabled_if=lambda p: False),
+            FieldSpec("max_frames", "Max frames", "text", "100", True),
+            FieldSpec("target_ids_monitored", "Target IDs to monitor", "text", "", False),
+            FieldSpec("execution_mode", "Execution mode", "combo", "planning_dry_run", True, choices=_section11_choices([
+                ("Planning / dry-run only", "planning_dry_run"),
+                ("Armed bounded execution", "armed_bounded_execution"),
+            ])),
+            FieldSpec("operator_armed_confirmation", "I understand this is bounded bench execution", "checkbox", False, visible_if=lambda p: p.get("execution_mode") == "armed_bounded_execution"),
+            FieldSpec("burst_size", "Burst size", "text", "1", False),
+            FieldSpec("burst_interval_ms", "Burst interval (ms)", "text", "0", False),
+            FieldSpec("random_seed", "Random seed", "text", "", False),
+            FieldSpec("manual_payload", "Manual payload", "textarea", "", False, visible_if=lambda p: p.get("payload_pattern") == "manual"),
+            FieldSpec("high_rate_confirmation", "I understand this is a high bench rate", "checkbox", False),
+            FieldSpec("physical_observation_note", "Observable function note", "textarea", "", False),
+            FieldSpec("bus_starvation_observation", "Bus starvation observation", "textarea", "", False),
+            FieldSpec("recovery_note", "Recovery note", "textarea", "", False),
+            FieldSpec("analyst_note", "Analyst note", "textarea", "", False),
         )
     return fields
 
@@ -2578,6 +2627,10 @@ def validate_modular_case(case_def: Any) -> Callable[[TargetProfile, dict[str, A
         errors = validate_modular_placeholder(_, params)
         if case_def.model.case_id == "uds_27" and params.get("group_of_dtc_preset") == "manual" and not str(params.get("raw_payload_override") or "").strip():
             errors["raw_payload_override"] = "Manual payload preset requires raw_payload_override in Advanced."
+        if case_def.model.case_id == "uds_29" and params.get("communication_control_preset") == "manual" and not str(params.get("raw_payload_override") or "").strip():
+            errors["raw_payload_override"] = "Manual CommunicationControl preset requires raw_payload_override in Advanced."
+        if case_def.model.case_id == "uds_30" and params.get("reset_subfunction") == "manual" and not str(params.get("raw_payload_override") or "").strip():
+            errors["raw_payload_override"] = "Manual ECU Reset preset requires raw_payload_override in Advanced."
         if case_def.model.case_id == "uds_31" and params.get("target_service") == "0x3D" and not bool(params.get("enable_advanced_memory_service", False)):
             errors["enable_advanced_memory_service"] = "WriteMemoryByAddress 0x3D is advanced; enable it explicitly for planning."
         if errors:
@@ -2591,6 +2644,8 @@ def validate_modular_case(case_def: Any) -> Callable[[TargetProfile, dict[str, A
             if "send_rate_msgs_per_sec" in params:
                 guard_data["max_frame_rate"] = params["send_rate_msgs_per_sec"]
                 guard_data["max_send_rate"] = params["send_rate_msgs_per_sec"]
+            if "max_frames" in params:
+                guard_data["max_messages"] = params["max_frames"]
             errors.update(runner.validate(case_def.model, params, SafetyGuard.from_mapping(guard_data)))
         except ValueError as exc:
             errors["runner"] = str(exc)
@@ -3272,6 +3327,10 @@ class RunWorker(QThread):
                 summary = self._run_modular_stub(evidence)
             elif self.test.runner_kind == "diagnostic_service":
                 summary = self._run_diagnostic_service(evidence)
+            elif self.test.runner_kind == "robustness" and self.test.id == "uds_31":
+                summary = self._run_uds31_robustness(evidence)
+            elif self.test.runner_kind == "can_priority_flood" and self.test.id == "uds_32":
+                summary = self._run_uds32_priority_bounded(evidence)
             else:
                 summary = self._run_direct(evidence)
         except Exception as exc:
@@ -3318,6 +3377,19 @@ class RunWorker(QThread):
                         errors["stop_on_bus_error"] = "UDS-28 requires stop_on_bus_error=true."
                     if guard.max_duration_seconds <= 0 or guard.max_messages <= 0 or guard.max_send_rate <= 0:
                         errors["safety_guard"] = "UDS-28 requires duration, max_messages, and max_send_rate limits."
+                if self.test.id == "uds_32" and not self.target.dry_run and self.params.get("execution_mode") == "armed_bounded_execution":
+                    if not bool(self.params.get("operator_armed_confirmation", False)):
+                        errors["operator_armed_confirmation"] = "UDS-32 armed execution requires explicit operator confirmation."
+                    if guard.manual_confirm_required and not bool(self.params.get("operator_armed_confirmation", False)):
+                        errors["manual_confirm_required"] = "Manual operator confirmation is required before UDS-32 armed execution."
+                    if not guard.bench_mode_required:
+                        errors["bench_mode_required"] = "UDS-32 requires bench_mode_required=true."
+                    if not guard.stop_button_required:
+                        errors["stop_button_required"] = "UDS-32 requires Stop button availability."
+                    if not guard.stop_on_bus_error:
+                        errors["stop_on_bus_error"] = "UDS-32 requires stop_on_bus_error=true."
+                    if guard.max_duration_seconds <= 0 or guard.max_messages <= 0 or guard.max_send_rate <= 0:
+                        errors["safety_guard"] = "UDS-32 requires duration, max_frames, and send-rate limits."
                 if self.test.runner_kind != "modular_stub" and guard.manual_confirm_required and not self.target.dry_run and not self.target.authorized_disruptive:
                     errors["manual_confirm_required"] = "Manual operator authorization is required before running this case."
             except ValueError as exc:
@@ -3395,6 +3467,8 @@ class RunWorker(QThread):
         if "send_rate_msgs_per_sec" in self.params:
             data["max_frame_rate"] = self.params["send_rate_msgs_per_sec"]
             data["max_send_rate"] = self.params["send_rate_msgs_per_sec"]
+        if "max_frames" in self.params:
+            data["max_messages"] = self.params["max_frames"]
         return SafetyGuard.from_mapping(data)
 
     def _run_modular_stub(self, evidence: EvidenceWriter) -> dict[str, Any]:
@@ -3792,12 +3866,12 @@ class RunWorker(QThread):
         self._opened_buses.append(bus)
         return can_mod, bus
 
-    def _send_raw_can(self, can_mod: Any, bus: Any, arbid: int, payload: bytes) -> None:
+    def _send_raw_can(self, can_mod: Any, bus: Any, arbid: int, payload: bytes, *, is_extended_id: Optional[bool] = None) -> None:
         if self.params.get("_mock_uds28_transport", False):
             self.log_line.emit(f"MOCK CAN TX {arbid:X}#{payload[:8].hex().upper()}")
             self.transcript_line.emit(f"MOCK CAN TX {arbid:X}#{payload[:8].hex().upper()}")
             return
-        msg = can_mod.Message(arbitration_id=arbid, data=payload[:8], is_extended_id=self.target.extended_id)
+        msg = can_mod.Message(arbitration_id=arbid, data=payload[:8], is_extended_id=self.target.extended_id if is_extended_id is None else is_extended_id)
         bus.send(msg)
         self.log_line.emit(f"CAN TX {arbid:X}#{payload[:8].hex().upper()}")
         self.transcript_line.emit(f"CAN TX {arbid:X}#{payload[:8].hex().upper()}")
@@ -3926,6 +4000,12 @@ class RunWorker(QThread):
         payload = runner.build_payload(case_model, self.params)
         suppress_positive = runner.suppress_positive_response_requested(payload)
         subfunction_meaning = runner.selected_subfunction_meaning(payload)
+        service_label = {
+            0x14: "clear_diagnostic_information",
+            0x85: "control_dtc_setting",
+            0x28: "communication_control_operational",
+            0x11: "ecu_reset_operational",
+        }.get(payload[0] if payload else -1, "diagnostic_service")
         observations: list[dict[str, Any]] = []
         for note in self._safety_notes():
             self.log_line.emit(f"Safety note: {note}")
@@ -3936,6 +4016,14 @@ class RunWorker(QThread):
             evidence.add_transcript(f"SAFETY: {warning}")
         if case_model.service_id.lower() in {"0x14", "14"}:
             warning = "ClearDiagnosticInformation may erase diagnostic evidence / DTC records. Manual confirmation is required."
+            self.log_line.emit(f"Safety note: {warning}")
+            evidence.add_transcript(f"SAFETY: {warning}")
+        if case_model.service_id.lower() in {"0x28", "28"}:
+            warning = "CommunicationControl while operational may disrupt communication; do not run on public roads."
+            self.log_line.emit(f"Safety note: {warning}")
+            evidence.add_transcript(f"SAFETY: {warning}")
+        if case_model.service_id.lower() in {"0x11", "11"}:
+            warning = "ECU Reset while operational may interrupt ECU function; do not run on public roads."
             self.log_line.emit(f"Safety note: {warning}")
             evidence.add_transcript(f"SAFETY: {warning}")
         evidence.add_transcript("ASSERTION No SecurityAccess seed/key exchange is performed by this runner before the tested request.")
@@ -3978,11 +4066,11 @@ class RunWorker(QThread):
 
         exchange = self._send_uds(client, payload)
         parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
-        obs = self._observation("control_dtc_setting", payload, exchange.response, parsed, exchange.error)
+        obs = self._observation(service_label, payload, exchange.response, parsed, exchange.error)
         observations.append(obs)
         self.parsed_row.emit(obs)
-        evidence.add_transcript(f"CONTROL_DTC_SETTING TX {spaced(payload)}")
-        evidence.add_transcript(f"CONTROL_DTC_SETTING RX {obs.get('response_hex') or '<no response>'} [{obs.get('response_type')}] {obs.get('note')}")
+        evidence.add_transcript(f"{service_label.upper()} TX {spaced(payload)}")
+        evidence.add_transcript(f"{service_label.upper()} RX {obs.get('response_hex') or '<no response>'} [{obs.get('response_type')}] {obs.get('note')}")
 
         result = runner.classify_response(
             positive=parsed.positive_response,
@@ -4020,7 +4108,19 @@ class RunWorker(QThread):
             "diagnostic_observation_note": str(self.params.get("diagnostic_observation_note") or ""),
             "dtc_update_effect_confirmed": str(self.params.get("dtc_update_effect_confirmed") or "unknown"),
             "dtc_clear_effect_confirmed": str(self.params.get("dtc_clear_effect_confirmed") or "unknown"),
+            "vehicle_state": str(self.params.get("vehicle_state") or ""),
+            "controlType": runner.control_type(payload),
+            "controlType_meaning": runner.control_type_meaning(payload),
+            "communicationType": runner.communication_type(payload),
+            "communicationType_meaning": runner.communication_type_meaning(payload),
+            "communication_disruption_observed": str(self.params.get("communication_disruption_observed") or "unknown"),
+            "reset_subfunction": runner.reset_subfunction(payload),
+            "reset_subfunction_meaning": runner.reset_subfunction_meaning(payload),
+            "ecu_downtime_estimate": str(self.params.get("ecu_downtime_recovery_note") or ""),
+            "recovery_status": str(self.params.get("recovery_note") or self.params.get("ecu_downtime_recovery_note") or ""),
+            "physical_interruption_note": str(self.params.get("physical_interruption_note") or ""),
             "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
+            "recovery_note": str(self.params.get("recovery_note") or ""),
             "analyst_note": str(self.params.get("analyst_note") or ""),
         })
         summary["evidence_record"] = self._diagnostic_service_evidence_record(
@@ -4038,6 +4138,21 @@ class RunWorker(QThread):
             group_of_dtc_meaning=runner.group_of_dtc_meaning(payload),
             evidence=evidence,
         )
+        if self.test.id in {"uds_29", "uds_30"}:
+            summary["evidence_record"].update({
+                "vehicle_state": summary.get("vehicle_state", ""),
+                "controlType": summary.get("controlType", ""),
+                "controlType_meaning": summary.get("controlType_meaning", ""),
+                "communicationType": summary.get("communicationType", ""),
+                "communicationType_meaning": summary.get("communicationType_meaning", ""),
+                "communication_disruption_observed": summary.get("communication_disruption_observed", ""),
+                "reset_subfunction": summary.get("reset_subfunction", ""),
+                "reset_subfunction_meaning": summary.get("reset_subfunction_meaning", ""),
+                "ecu_downtime_estimate": summary.get("ecu_downtime_estimate", ""),
+                "recovery_status": summary.get("recovery_status", ""),
+                "physical_interruption_note": summary.get("physical_interruption_note", ""),
+                "recovery_note": summary.get("recovery_note", ""),
+            })
         return summary
 
     def _diagnostic_service_evidence_record(
@@ -4085,6 +4200,250 @@ class RunWorker(QThread):
             verdict=verdict,
             raw_log_path=str(evidence.dir / "raw_can_or_uds_log.txt") if evidence.save_output else "",
         ).as_dict()
+
+    def _run_uds31_robustness(self, evidence: EvidenceWriter) -> dict[str, Any]:
+        case_model = normalize_case_model(self.test.case_model)
+        safety_guard = self._effective_safety_guard()
+        runner = make_modular_runner("robustness")
+        errors = runner.validate(case_model, self.params, safety_guard)
+        if errors:
+            return self._error_summary(evidence, VERDICT_CONFIG, json.dumps(errors, sort_keys=True))
+        payload = runner.build_payload(case_model, self.params)
+        attempt_count = min(self._int_param("attempt_count", 1), max(1, safety_guard.max_messages))
+        delay_s = 1.0 / max(0.001, float(safety_guard.max_frame_rate))
+        observations: list[dict[str, Any]] = []
+        raw_log: list[str] = []
+        service_text = runner.target_service(self.params)
+        service_meaning = runner.target_service_meaning(service_text)
+
+        self.log_line.emit(f"UDS-31 started: bounded oversized payload attempt_count={attempt_count}")
+        evidence.add_transcript("UDS-31 BOUNDED OVERSIZED PAYLOAD ROBUSTNESS")
+        evidence.add_transcript(f"Target service {service_text} {service_meaning}")
+        evidence.add_transcript(f"Payload length {len(payload)} sample {spaced(payload[:64])}{' ...' if len(payload) > 64 else ''}")
+
+        client = self._open_uds_client()
+        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations)
+        if session_failure:
+            session_failure.update(self._uds31_evidence_record(evidence, payload, "", "session_flow_failed", observations, "INCONCLUSIVE"))
+            return session_failure
+
+        stop_reason = ""
+        response_classification = ""
+        response_payload = ""
+        positive = False
+        nrc = ""
+        for attempt in range(attempt_count):
+            if self._stop_requested:
+                stop_reason = "user_stop"
+                break
+            exchange = self._send_uds(client, payload)
+            parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
+            obs = self._observation(f"uds31_attempt_{attempt + 1}", payload, exchange.response, parsed, exchange.error)
+            observations.append(obs)
+            self.parsed_row.emit(obs)
+            raw_log.append(json.dumps(obs, sort_keys=True))
+            response_classification = str(obs.get("response_type") or "")
+            response_payload = str(obs.get("response_hex") or "")
+            positive = bool(obs.get("positive_response", False))
+            nrc = str(obs.get("nrc") or "")
+            if response_classification == "transport_error":
+                stop_reason = "transport_error"
+                break
+            if attempt + 1 < attempt_count:
+                time.sleep(delay_s)
+        if not stop_reason:
+            stop_reason = "attempt_count_reached"
+
+        recovery_delay = self._float_param("recovery_delay_seconds", 2.0)
+        recovery_status = "not_checked"
+        if not self._stop_requested and recovery_delay >= 0:
+            time.sleep(min(recovery_delay, max(0.0, safety_guard.max_duration_seconds)))
+            recovery = self._send_uds(client, bytes([0x3E, 0x00]))
+            recovery_parsed = parse_uds_response(bytes([0x3E, 0x00]), recovery.response, transport_status=recovery.response_type)
+            recovery_obs = self._observation("uds31_recovery_check", bytes([0x3E, 0x00]), recovery.response, recovery_parsed, recovery.error)
+            observations.append(recovery_obs)
+            raw_log.append(json.dumps(recovery_obs, sort_keys=True))
+            recovery_status = str(recovery_obs.get("response_type") or "")
+        elif self._stop_requested:
+            recovery_status = "skipped_user_stop"
+
+        if evidence.save_output:
+            evidence.write_text("raw_can_or_uds_log.txt", "\n".join(raw_log))
+        verdict, rationale = self._uds31_verdict(response_classification, positive, nrc, recovery_status)
+        summary = self._base_summary(evidence)
+        summary.update({
+            "request_hex": spaced(payload),
+            "response_hex": response_payload,
+            "response_type": response_classification,
+            "response_classification": response_classification,
+            "positive_response": positive,
+            "nrc": nrc,
+            "verdict": verdict,
+            "rationale": rationale,
+            "observations": observations,
+            "stop_reason": stop_reason,
+        })
+        summary.update(self._uds31_evidence_record(evidence, payload, response_payload, response_classification, observations, verdict, recovery_status=recovery_status))
+        self.log_line.emit(f"UDS-31 stopped: {stop_reason}; verdict={verdict}")
+        return summary
+
+    def _uds31_evidence_record(
+        self,
+        evidence: EvidenceWriter,
+        payload: bytes,
+        response_payload: str,
+        response_classification: str,
+        observations: list[dict[str, Any]],
+        verdict: str,
+        *,
+        recovery_status: str = "",
+    ) -> dict[str, Any]:
+        runner = make_modular_runner("robustness")
+        service_text = runner.target_service(self.params)
+        service_meaning = runner.target_service_meaning(service_text)
+        record = {
+            "display_id": self.test.display_id or "UDS-31",
+            "canonical_id": self.test.canonical_id or self.test.id,
+            "session_flow": str(self.params.get("session_flow") or ""),
+            "target_service": service_text,
+            "target_service_meaning": service_meaning,
+            "service_specific_parameters": {
+                "subfunction": str(self.params.get("subfunction") or ""),
+                "did_hex": str(self.params.get("did_hex") or ""),
+                "routine_identifier": str(self.params.get("routine_identifier") or ""),
+                "block_sequence_counter": str(self.params.get("block_sequence_counter") or ""),
+            },
+            "payload_length": self._int_param("payload_length", 64),
+            "payload_pattern": str(self.params.get("payload_pattern") or ""),
+            "request_payload_sample": spaced(payload[:64]) + (" ..." if len(payload) > 64 else ""),
+            "response_payload": response_payload,
+            "response_classification": response_classification,
+            "timeout/no-response": response_classification in {"timeout", "no_response"},
+            "crash_or_reset_observed": str(self.params.get("crash_or_reset_observed") or "unknown"),
+            "recovery_status": recovery_status or str(self.params.get("recovery_note") or ""),
+            "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
+            "verdict": verdict,
+            "raw_log_path": str(evidence.dir / "raw_can_or_uds_log.txt") if evidence.save_output else "",
+        }
+        return {"uds31_evidence_record": record, **record}
+
+    def _uds31_verdict(self, response_classification: str, positive: bool, nrc: str, recovery_status: str) -> tuple[str, str]:
+        notes = " ".join([
+            str(self.params.get("crash_or_reset_observed") or ""),
+            str(self.params.get("recovery_note") or ""),
+            str(self.params.get("physical_observation_note") or ""),
+        ]).lower()
+        if response_classification == "transport_error":
+            return "ERROR", "Transport/tool execution error occurred during UDS-31."
+        if any(word in notes for word in ("crash", "reset", "power cycle", "unavailable", "corrupt", "loss")):
+            return "FINDING_CANDIDATE", "Evidence notes indicate crash/reset, persistent loss, corruption, or recovery concern."
+        if recovery_status and recovery_status not in {"positive_response", "raw_response", "not_checked"}:
+            return "FINDING_CANDIDATE", "Recovery check did not show normal target responsiveness after oversized payload."
+        if nrc or response_classification == "negative_response":
+            return "PASS / SECURE_BEHAVIOR", "ECU rejected the oversized/boundary request and no instability evidence was recorded."
+        if positive:
+            return "OBSERVATION", "ECU returned a positive response to oversized/boundary input; impact evidence is required."
+        if response_classification in {"timeout", "no_response"}:
+            return "OBSERVATION", "Timeout/no-response occurred; by itself this does not prove a crash or security finding."
+        return "INCONCLUSIVE", "UDS-31 result requires additional baseline or recovery evidence."
+
+    def _run_uds32_priority_bounded(self, evidence: EvidenceWriter) -> dict[str, Any]:
+        if self.params.get("execution_mode") != "armed_bounded_execution":
+            return self._error_summary(evidence, VERDICT_CONFIG, "UDS-32 actual sending requires Armed bounded execution.")
+        case_model = normalize_case_model(self.test.case_model)
+        safety_guard = self._effective_safety_guard()
+        runner = make_modular_runner("can_priority_flood")
+        errors = runner.validate(case_model, self.params, safety_guard)
+        if errors:
+            return self._error_summary(evidence, VERDICT_CONFIG, json.dumps(errors, sort_keys=True))
+        can_id = parse_hex_int(self.params.get("can_id") or "0x000", name="can_id", maximum=0x1FFFFFFF)
+        is_extended_id = bool(self.params.get("is_extended_id", False))
+        payload = runner.payload(self.params)
+        rate = self._float_param("send_rate_msgs_per_sec", safety_guard.max_send_rate)
+        delay_s = 1.0 / max(0.001, rate)
+        duration = min(self._float_param("max_duration_seconds", safety_guard.max_duration_seconds), safety_guard.max_duration_seconds)
+        max_frames = min(self._int_param("max_frames", safety_guard.max_messages), int(rate * duration) if rate > 0 and duration > 0 else safety_guard.max_messages)
+        started = time.monotonic()
+        actual_frames = 0
+        bus_error_count = 0
+        stop_reason = ""
+        raw_log: list[str] = []
+        self.log_line.emit(f"UDS-32 started: CAN ID 0x{can_id:X}, max_frames={max_frames}, rate={rate:g} msg/s")
+        evidence.add_transcript("UDS-32 BOUNDED CAN PRIORITY AVAILABILITY")
+        can_mod, bus = self._open_can_bus()
+        try:
+            while not stop_reason:
+                elapsed = time.monotonic() - started
+                if elapsed >= duration:
+                    stop_reason = "duration_limit"
+                    break
+                if actual_frames >= max_frames:
+                    stop_reason = "max_frames_reached"
+                    break
+                if self._stop_requested:
+                    stop_reason = "user_stop"
+                    break
+                try:
+                    self._send_raw_can(can_mod, bus, can_id, payload, is_extended_id=is_extended_id)
+                    actual_frames += 1
+                    raw_log.append(json.dumps({"frame": actual_frames, "can_id": f"0x{can_id:X}", "payload": spaced(payload), "elapsed_seconds": round(elapsed, 6)}, sort_keys=True))
+                except Exception as exc:
+                    bus_error_count += 1
+                    stop_reason = "bus_error"
+                    raw_log.append(f"BUS_ERROR {type(exc).__name__}: {exc}")
+                    break
+                sleep_for = min(delay_s, max(0.0, duration - (time.monotonic() - started)))
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+        finally:
+            if evidence.save_output:
+                evidence.write_text("raw_can_or_uds_log.txt", "\n".join(raw_log))
+        verdict, rationale = self._uds32_verdict(bus_error_count, stop_reason)
+        record = {
+            "display_id": self.test.display_id or "UDS-32",
+            "canonical_id": self.test.canonical_id or self.test.id,
+            "can_id": f"0x{can_id:X}",
+            "is_extended_id": is_extended_id,
+            "payload_pattern": str(self.params.get("payload_pattern") or ""),
+            "duration_seconds": duration,
+            "send_rate_msgs_per_sec": rate,
+            "inter_frame_delay_ms": round(1000.0 / rate, 3) if rate > 0 else 0,
+            "max_frames": max_frames,
+            "actual_frames_sent": actual_frames,
+            "target_ids_monitored": str(self.params.get("target_ids_monitored") or ""),
+            "bus_error_count": bus_error_count,
+            "stop_reason": stop_reason,
+            "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
+            "recovery_status": str(self.params.get("recovery_note") or ""),
+            "verdict": verdict,
+            "raw_log_path": str(evidence.dir / "raw_can_or_uds_log.txt") if evidence.save_output else "",
+        }
+        summary = self._base_summary(evidence)
+        summary.update(record)
+        summary.update({
+            "request_hex": f"{can_id:X}#{payload.hex().upper()}",
+            "response_type": "not_applicable_can_bus_level",
+            "verdict": verdict,
+            "rationale": rationale,
+            "observations": [{"actual_frames_sent": actual_frames, "stop_reason": stop_reason, "bus_error_count": bus_error_count}],
+            "uds32_evidence_record": record,
+        })
+        self.log_line.emit(f"UDS-32 stopped: {stop_reason}; frames={actual_frames}; verdict={verdict}")
+        return summary
+
+    def _uds32_verdict(self, bus_error_count: int, stop_reason: str) -> tuple[str, str]:
+        notes = " ".join([
+            str(self.params.get("bus_starvation_observation") or ""),
+            str(self.params.get("physical_observation_note") or ""),
+            str(self.params.get("recovery_note") or ""),
+        ]).lower()
+        if bus_error_count or stop_reason == "bus_error":
+            return "FINDING_CANDIDATE", "Bus error occurred during bounded UDS-32 availability traffic."
+        if any(word in notes for word in ("starv", "delay", "reset", "loss", "unavailable", "interrupt", "failed", "power cycle")):
+            return "FINDING_CANDIDATE", "Observation notes indicate starvation, physical impact, or recovery concern."
+        if not notes.strip():
+            return "OBSERVATION", "Bounded CAN availability traffic completed; monitoring/physical evidence is insufficient for a stronger verdict."
+        return "PASS / SECURE_BEHAVIOR", "Bus/target remained responsive under bounded load and recovery evidence did not indicate persistent degradation."
 
     def _dry_run(self, evidence: EvidenceWriter) -> dict[str, Any]:
         self.log_line.emit("Dry run only. No CAN request or external command was executed.")
@@ -4162,6 +4521,76 @@ class RunWorker(QThread):
                 group_of_dtc_meaning=group_of_dtc_meaning,
                 evidence=evidence,
             )
+            if self.test.id in {"uds_29", "uds_30"}:
+                summary["vehicle_state"] = str(self.params.get("vehicle_state") or "")
+                summary["controlType"] = runner.control_type(payload_bytes) if "payload_bytes" in locals() else ""
+                summary["controlType_meaning"] = runner.control_type_meaning(payload_bytes) if "payload_bytes" in locals() else ""
+                summary["communicationType"] = runner.communication_type(payload_bytes) if "payload_bytes" in locals() else ""
+                summary["communicationType_meaning"] = runner.communication_type_meaning(payload_bytes) if "payload_bytes" in locals() else ""
+                summary["communication_disruption_observed"] = str(self.params.get("communication_disruption_observed") or "unknown")
+                summary["reset_subfunction"] = runner.reset_subfunction(payload_bytes) if "payload_bytes" in locals() else ""
+                summary["reset_subfunction_meaning"] = runner.reset_subfunction_meaning(payload_bytes) if "payload_bytes" in locals() else ""
+                summary["ecu_downtime_estimate"] = str(self.params.get("ecu_downtime_recovery_note") or "")
+                summary["recovery_status"] = str(self.params.get("recovery_note") or self.params.get("ecu_downtime_recovery_note") or "")
+                summary["physical_interruption_note"] = str(self.params.get("physical_interruption_note") or "")
+                summary["recovery_note"] = str(self.params.get("recovery_note") or "")
+                summary["evidence_record"].update({
+                    "vehicle_state": summary["vehicle_state"],
+                    "controlType": summary["controlType"],
+                    "controlType_meaning": summary["controlType_meaning"],
+                    "communicationType": summary["communicationType"],
+                    "communicationType_meaning": summary["communicationType_meaning"],
+                    "communication_disruption_observed": summary["communication_disruption_observed"],
+                    "reset_subfunction": summary["reset_subfunction"],
+                    "reset_subfunction_meaning": summary["reset_subfunction_meaning"],
+                    "ecu_downtime_estimate": summary["ecu_downtime_estimate"],
+                    "recovery_status": summary["recovery_status"],
+                    "physical_interruption_note": summary["physical_interruption_note"],
+                    "recovery_note": summary["recovery_note"],
+                })
+        elif self.test.id == "uds_31":
+            runner = make_modular_runner("robustness")
+            guard = self._effective_safety_guard()
+            plan = runner.plan(normalize_case_model(self.test.case_model), self.params, guard).as_dict()
+            summary["execution_steps"] = plan.get("steps", [])
+            try:
+                payload = runner.build_payload(normalize_case_model(self.test.case_model), self.params)
+                summary["request_hex"] = spaced(payload[:64]) + (" ..." if len(payload) > 64 else "")
+                summary.update(self._uds31_evidence_record(evidence, payload, "", "dry_run", [], "DRY_RUN / NOT_EXECUTED", recovery_status="dry_run"))
+            except ValueError as exc:
+                summary["request_hex"] = f"<invalid: {exc}>"
+        elif self.test.id == "uds_32":
+            runner = make_modular_runner("can_priority_flood")
+            guard = self._effective_safety_guard()
+            plan = runner.plan(normalize_case_model(self.test.case_model), self.params, guard).as_dict()
+            summary["execution_steps"] = plan.get("steps", [])
+            try:
+                payload = runner.payload(self.params)
+            except ValueError:
+                payload = b""
+            rate = self._float_param("send_rate_msgs_per_sec", guard.max_send_rate)
+            record = {
+                "display_id": self.test.display_id or "UDS-32",
+                "canonical_id": self.test.canonical_id or self.test.id,
+                "can_id": str(self.params.get("can_id") or "0x000"),
+                "is_extended_id": bool(self.params.get("is_extended_id", False)),
+                "payload_pattern": str(self.params.get("payload_pattern") or ""),
+                "duration_seconds": self._float_param("max_duration_seconds", guard.max_duration_seconds),
+                "send_rate_msgs_per_sec": rate,
+                "inter_frame_delay_ms": round(1000.0 / rate, 3) if rate > 0 else 0,
+                "max_frames": self._int_param("max_frames", guard.max_messages),
+                "actual_frames_sent": 0,
+                "target_ids_monitored": str(self.params.get("target_ids_monitored") or ""),
+                "bus_error_count": 0,
+                "stop_reason": "dry_run",
+                "physical_observation_note": str(self.params.get("physical_observation_note") or ""),
+                "recovery_status": str(self.params.get("recovery_note") or ""),
+                "verdict": "DRY_RUN / NOT_EXECUTED",
+                "raw_log_path": "",
+            }
+            summary.update(record)
+            summary["request_hex"] = f"{record['can_id']}#{payload.hex().upper()}" if payload else ""
+            summary["uds32_evidence_record"] = record
         elif self.test.id in {"uds_23", "uds_24"}:
             service_id = 0x34 if self.test.id == "uds_23" else 0x35
             candidates = memory_transfer_request_candidates(service_id, self.params)
@@ -5498,14 +5927,14 @@ class UdsReconGui(QMainWindow):
             self.field_label_widgets[field_spec.id] = label
             self.field_holder_widgets[field_spec.id] = holder
             self.error_labels[field_spec.id] = error
-        if self.current_test.id in {f"uds_{idx}" for idx in range(26, 32)}:
+        if self.current_test.id in {f"uds_{idx}" for idx in range(26, 33)}:
             if section_forms["advanced"].rowCount():
                 self.params_layout.addRow(advanced_box)
             if section_forms["evidence"].rowCount():
                 self.params_layout.addRow(evidence_box)
         self.did_catalog_box.setVisible(self.current_test.id in {"uds_21", "uds_22"})
         self.arbid_catalog_box.setVisible(self.current_test.id == "uds_28")
-        self.stop_btn.setText("Stop DoS" if self.current_test.id == "uds_28" else "Stop")
+        self.stop_btn.setText("Stop DoS" if self.current_test.id == "uds_28" else "Stop Flood" if self.current_test.id == "uds_32" else "Stop")
         self._apply_field_conditions(params)
 
     def _build_collapsible_param_section(self, title: str) -> tuple[QGroupBox, QFormLayout]:
@@ -5670,6 +6099,9 @@ class UdsReconGui(QMainWindow):
         if self.current_test.id == "uds_28":
             self._sync_uds28_derived_fields(params)
             params = self._collect_params()
+        if self.current_test.id == "uds_32":
+            self._sync_uds32_derived_fields(params)
+            params = self._collect_params()
         self._apply_field_conditions(params)
         target, errors = self._collect_target()
 
@@ -5718,6 +6150,14 @@ class UdsReconGui(QMainWindow):
             pass
         self._set_auto_line_text("no_response_expected_ratio_percent", no_response)
         self._uds28_last_auto_delay_ms = delay_ms
+
+    def _sync_uds32_derived_fields(self, params: dict[str, Any]) -> None:
+        try:
+            send_rate = float(params.get("send_rate_msgs_per_sec") or 0)
+        except ValueError:
+            send_rate = 0
+        delay_ms = "0" if send_rate <= 0 else f"{1000.0 / send_rate:.0f}"
+        self._set_auto_line_text("inter_frame_delay_ms", delay_ms)
 
     def _set_auto_line_text(self, field_id: str, value: str) -> None:
         widget = self.field_widgets.get(field_id)
@@ -5970,8 +6410,10 @@ class UdsReconGui(QMainWindow):
                     f"{idx + 1:02d}. {step.get('step')} {step.get('request_hex', '') or ('wait=' + str(step.get('wait_seconds')) + 's' if step.get('wait_seconds') is not None else '')}"
                     for idx, step in enumerate(plan)
                 )
-            elif self.current_test.runner_kind in {"modular_stub", "diagnostic_service"}:
+            elif self.current_test.runner_kind in {"modular_stub", "diagnostic_service", "robustness", "can_priority_flood"}:
                 if self.current_test.id in {f"uds_{idx}" for idx in range(26, 32)}:
+                    preview = self._build_section11_preview(params, target)
+                elif self.current_test.id == "uds_32":
                     preview = self._build_section11_preview(params, target)
                 else:
                     guard = SafetyGuard.from_mapping(self.current_test.safety_guard | {
@@ -6016,6 +6458,8 @@ class UdsReconGui(QMainWindow):
             return self._build_uds30_preview(params)
         if test_id == "uds_31":
             return self._build_uds31_preview(params)
+        if test_id == "uds_32":
+            return self._build_uds32_preview(params)
         return "Safety: dry-run only"
 
     def _build_diagnostic_section11_preview(self, params: dict[str, Any]) -> str:
@@ -6143,7 +6587,8 @@ class UdsReconGui(QMainWindow):
             f"Final request: {request}",
             f"controlType meaning: {meanings.get(control_type, '<manual>')}",
             f"communicationType value: {comm_type or '<unset>'}",
-            "Safety: dry-run only",
+            "Execution: single controlled diagnostic request; non-dry requires manual confirmation.",
+            "Safety: manual confirmation required",
         ]
         vehicle_state = str(params.get("vehicle_state") or "")
         if control_type in {"0x01", "0x02", "0x03"} or "operational" in vehicle_state or "controlled driving" in vehicle_state:
@@ -6181,7 +6626,8 @@ class UdsReconGui(QMainWindow):
             "Assessment scenario: ECU Reset 0x11 while operational.",
             "0x11 is ECU Reset, not CommunicationControl.",
             f"Final request: {request}",
-            "Safety: dry-run only",
+            "Execution: single controlled diagnostic request; non-dry requires manual confirmation.",
+            "Safety: manual confirmation required",
         ]
         vehicle_state = str(params.get("vehicle_state") or "")
         if "operational" in vehicle_state or "controlled driving" in vehicle_state:
@@ -6189,13 +6635,24 @@ class UdsReconGui(QMainWindow):
         return "\n".join(lines)
 
     def _build_uds31_preview(self, params: dict[str, Any]) -> str:
-        target_service = str(params.get("manual_service_id") if params.get("target_service") == "manual" else params.get("target_service") or "")
+        runner = make_modular_runner("robustness")
+        try:
+            payload = runner.build_payload(normalize_case_model(self.current_test.case_model), params)
+            request = spaced(payload[:64]) + (" ..." if len(payload) > 64 else "")
+            target_service = runner.target_service(params)
+            meaning = runner.target_service_meaning(target_service)
+        except Exception as exc:
+            request = f"<invalid: {exc}>"
+            target_service = str(params.get("manual_service_id") if params.get("target_service") == "manual" else params.get("target_service") or "")
+            meaning = ""
         dynamic: list[str] = []
         for key, label in (
             ("subfunction", "subfunction"),
             ("did_hex", "DID"),
             ("routine_identifier", "routineIdentifier"),
             ("block_sequence_counter", "blockSequenceCounter"),
+            ("data_format_identifier", "DFI"),
+            ("address_length_format_identifier", "ALFI"),
         ):
             if key in params and str(params.get(key) or "").strip():
                 widget = self.field_holder_widgets.get(key)
@@ -6204,17 +6661,45 @@ class UdsReconGui(QMainWindow):
         lines = [
             "Assessment scenario: UDS oversized payload / buffer robustness.",
             "UDS-31 is the test case ID, not necessarily service 0x31 RoutineControl.",
-            f"Target service: {target_service or '<unset>'}",
+            f"Target service: {target_service or '<unset>'} {meaning}".strip(),
             f"Dynamic parameters: {', '.join(dynamic) if dynamic else '<none>'}",
             f"Payload length: {params.get('payload_length')}",
             f"Payload pattern: {params.get('payload_pattern')}",
+            f"Attempt count: {params.get('attempt_count') or '1'}",
             f"ISO-TP enabled: {bool(params.get('isotp_enabled', False))}",
+            f"Final request sample: {request}",
             "Verdict is based on safe rejection, crash/reset/no-response/recovery behavior.",
-            "Safety: dry-run only",
+            "Safety: manual confirmation required; bounded single/bounded-attempt execution only.",
         ]
         if params.get("target_service") == "0x3D":
             lines.append("Warning: 0x3D WriteMemoryByAddress is advanced and disabled by default.")
         return "\n".join(lines)
+
+    def _build_uds32_preview(self, params: dict[str, Any]) -> str:
+        runner = make_modular_runner("can_priority_flood")
+        try:
+            payload = spaced(runner.payload(params))
+        except Exception as exc:
+            payload = f"<invalid: {exc}>"
+        rate = self._safe_float(params.get("send_rate_msgs_per_sec"), 10.0)
+        duration = self._safe_float(params.get("max_duration_seconds"), 10.0)
+        max_frames = self._safe_int(params.get("max_frames"), int(rate * duration) if rate > 0 and duration > 0 else 0)
+        delay_ms = 0.0 if rate <= 0 else 1000.0 / rate
+        return "\n".join([
+            "Assessment scenario: CAN bus-level priority/arbitration availability.",
+            "UDS-32 is not a normal UDS service; lower numeric CAN IDs have higher arbitration priority.",
+            f"CAN ID: {params.get('can_id') or '0x000'}",
+            f"Extended ID: {bool(params.get('is_extended_id', False))}",
+            f"Final frame: {params.get('can_id') or '0x000'}#{payload.replace(' ', '') if not payload.startswith('<') else payload}",
+            f"Send rate: {rate:g} msg/s",
+            f"Inter-frame delay: {delay_ms:.0f} ms",
+            f"Duration: {duration:g} s",
+            f"Max frames: {max_frames}",
+            f"Execution: {'armed bounded execution' if params.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
+            "Safety: manual confirmation and bench mode required; bounded frames only.",
+            "Stop: stop on duration, max frames, bus error, or operator stop.",
+            "Assessment: verdict is based on observed starvation, physical impact, and recovery evidence.",
+        ])
 
     def _run_selected(self) -> None:
         self._refresh_validation_and_preview()
@@ -6226,6 +6711,8 @@ class UdsReconGui(QMainWindow):
         if target is None:
             return
         if self.current_test.id == "uds_28" and self._collect_params().get("execution_mode") != "armed_bounded_execution":
+            target.dry_run = True
+        if self.current_test.id == "uds_32" and self._collect_params().get("execution_mode") != "armed_bounded_execution":
             target.dry_run = True
         if target.save_output:
             ensure_dir(target.output_dir)
@@ -6756,6 +7243,22 @@ def run_self_checks() -> None:
             assert reg_entry.display_id == "UDS-27"
             assert reg_entry.canonical_id == "uds27_unauthenticated_clear_diagnostic_information"
             assert reg_entry.disruptive
+        elif test_id == "uds_29":
+            assert reg_entry.runner_kind == "diagnostic_service"
+            assert reg_entry.canonical_id == "uds29_communication_control_when_operational"
+            assert "communication_control_preset" in {field.id for field in reg_entry.fields}
+        elif test_id == "uds_30":
+            assert reg_entry.runner_kind == "diagnostic_service"
+            assert reg_entry.canonical_id == "uds30_ecu_reset_when_operational"
+            assert "reset_subfunction" in {field.id for field in reg_entry.fields}
+        elif test_id == "uds_31":
+            assert reg_entry.runner_kind == "robustness"
+            assert reg_entry.canonical_id == "uds31_oversized_payload_buffer_robustness"
+            assert "target_service" in {field.id for field in reg_entry.fields}
+        elif test_id == "uds_32":
+            assert reg_entry.runner_kind == "can_priority_flood"
+            assert reg_entry.canonical_id == "uds32_priority_bus_flood_arbitration_availability"
+            assert "can_id" in {field.id for field in reg_entry.fields}
         else:
             assert reg_entry.runner_kind == "modular_stub"
         assert reg_entry.category == "UDS Test Cases"
@@ -6946,6 +7449,30 @@ def run_self_checks() -> None:
     assert uds27_summary["canonical_id"] == "uds27_unauthenticated_clear_diagnostic_information"
     assert uds27_summary["evidence_record"]["selected_group_of_dtc"] == "FF FF FF"
     assert uds27_summary["evidence_record"]["group_of_dtc_meaning"] == "all DTC groups"
+    uds29_test = registry["uds_29"]
+    uds29_params = default_params_for_test(uds29_test)
+    assert spaced(uds26_runner.build_payload(normalize_case_model(uds29_test.case_model), uds29_params)) == "28 01 01"
+    assert "CommunicationControl" in UdsReconGui()._build_uds29_preview(uds29_params)
+    uds30_test = registry["uds_30"]
+    uds30_params = default_params_for_test(uds30_test)
+    assert spaced(uds26_runner.build_payload(normalize_case_model(uds30_test.case_model), uds30_params)) == "11 03"
+    assert "0x11 is ECU Reset" in UdsReconGui()._build_uds30_preview(uds30_params)
+    uds31_test = registry["uds_31"]
+    uds31_params = default_params_for_test(uds31_test) | {"payload_pattern": "zero-fill", "payload_length": "8"}
+    uds31_runner = make_modular_runner("robustness")
+    uds31_payload = uds31_runner.build_payload(normalize_case_model(uds31_test.case_model), uds31_params)
+    assert uds31_payload[:3] == bytes.fromhex("2E F1 90") and len(uds31_payload) == 11
+    uds31_3d_errors = uds31_runner.validate(
+        normalize_case_model(uds31_test.case_model),
+        uds31_params | {"target_service": "0x3D", "enable_advanced_memory_service": False},
+        SafetyGuard.from_mapping(uds31_test.safety_guard),
+    )
+    assert "enable_advanced_memory_service" in uds31_3d_errors or "request_payload" in uds31_3d_errors
+    uds32_test = registry["uds_32"]
+    uds32_params = default_params_for_test(uds32_test)
+    uds32_runner = make_modular_runner("can_priority_flood")
+    assert uds32_runner.payload(uds32_params) == bytes([0] * 8)
+    assert "CAN bus-level" in uds32_runner.dry_run_preview(normalize_case_model(uds32_test.case_model), uds32_params, SafetyGuard.from_mapping(uds32_test.safety_guard))
     placeholder_dir = Path(tempfile.mkdtemp())
     placeholder_target = mk_target(dry_run=False, authorized=False, output_dir=placeholder_dir)
     placeholder_test = registry["uds_28"]

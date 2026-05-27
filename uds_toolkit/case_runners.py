@@ -126,6 +126,10 @@ class DiagnosticServiceRunner(_StubRunner):
                 errors["subfunction"] = "ControlDTCSetting requires a subfunction byte"
             elif self._service_id(case, parameters, payload[0]) == 0x14 and len(payload) != 4 and not (raw_override and advanced_override):
                 errors["group_of_dtc"] = "ClearDiagnosticInformation requires service 0x14 plus exactly 3 groupOfDTC bytes"
+            elif self._service_id(case, parameters, payload[0]) == 0x28 and len(payload) != 3 and not (raw_override and advanced_override):
+                errors["request_payload"] = "CommunicationControl normally requires 28 <controlType> <communicationType>; shorter/custom payloads require advanced_raw_payload_override_enabled=true"
+            elif self._service_id(case, parameters, payload[0]) == 0x11 and len(payload) != 2 and not (raw_override and advanced_override):
+                errors["request_payload"] = "ECU Reset normally requires 11 <resetSubfunction>; custom payloads require advanced_raw_payload_override_enabled=true"
         return errors
 
     def dry_run_preview(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
@@ -137,6 +141,12 @@ class DiagnosticServiceRunner(_StubRunner):
         suppress = False
         group_of_dtc = ""
         group_meaning = ""
+        control_type = ""
+        control_meaning = ""
+        communication_type = ""
+        communication_meaning = ""
+        reset_subfunction = ""
+        reset_meaning = ""
         try:
             payload_bytes = self.build_payload(case, parameters)
             payload = spaced(payload_bytes)
@@ -144,6 +154,12 @@ class DiagnosticServiceRunner(_StubRunner):
             suppress = self.suppress_positive_response_requested(payload_bytes)
             group_of_dtc = self.selected_group_of_dtc(payload_bytes)
             group_meaning = self.group_of_dtc_meaning(payload_bytes)
+            control_type = self.control_type(payload_bytes)
+            control_meaning = self.control_type_meaning(payload_bytes)
+            communication_type = self.communication_type(payload_bytes)
+            communication_meaning = self.communication_type_meaning(payload_bytes)
+            reset_subfunction = self.reset_subfunction(payload_bytes)
+            reset_meaning = self.reset_subfunction_meaning(payload_bytes)
         except ValueError as exc:
             payload = f"<invalid: {exc}>"
         session_flow = str(parameters.get("session_flow") or "")
@@ -160,10 +176,38 @@ class DiagnosticServiceRunner(_StubRunner):
             f"groupOfDTC meaning: {group_meaning or '<not applicable>'}",
             _preview_safety_line(case),
         ]
+        if case.case_id == "uds_29":
+            lines.extend([
+                f"controlType: {control_type or '<not available>'}",
+                f"controlType meaning: {control_meaning or '<not available>'}",
+                f"communicationType: {communication_type or '<not available>'}",
+                f"communicationType meaning: {communication_meaning or '<not available>'}",
+                f"Vehicle state: {parameters.get('vehicle_state') or '<unset>'}",
+                "Assessment: no fixed NRC is assumed; verdict depends on observed behavior, disruption, and recovery evidence.",
+            ])
+        if case.case_id == "uds_30":
+            lines.extend([
+                "Service: 0x11 ECU Reset",
+                f"resetSubfunction: {reset_subfunction or '<not available>'}",
+                f"resetSubfunction meaning: {reset_meaning or '<not available>'}",
+                f"Vehicle state: {parameters.get('vehicle_state') or '<unset>'}",
+                "Assessment: no fixed NRC is assumed; verdict depends on observed behavior, interruption, and recovery evidence.",
+            ])
         if self._disable_dtc_setting_requested(parameters):
             lines.append("Warning: 0x85 0x02 may suppress diagnostic trouble code updates; confirm diagnostic effect manually.")
         if self._clear_diagnostic_information_requested(case, parameters):
             lines.append("Warning: this test may erase diagnostic evidence / DTC records. Manual confirmation is required for non-dry execution.")
+        if case.case_id == "uds_29" and (
+            str(parameters.get("communication_control_preset") or "") in {"0x01", "0x02", "0x03"}
+            or "operational" in str(parameters.get("vehicle_state") or "")
+            or "controlled driving" in str(parameters.get("vehicle_state") or "")
+        ):
+            lines.append("Warning: disabling communication or operational/driving-state assessment must not be run on public roads.")
+        if case.case_id == "uds_30" and (
+            "operational" in str(parameters.get("vehicle_state") or "")
+            or "controlled driving" in str(parameters.get("vehicle_state") or "")
+        ):
+            lines.append("Warning: ECU Reset while operational can interrupt functions; do not run on public roads.")
         raw_warning = self.raw_payload_format_warning(case, parameters)
         if raw_warning:
             lines.append(f"Warning: {raw_warning}")
@@ -193,6 +237,12 @@ class DiagnosticServiceRunner(_StubRunner):
             "suppress_positive_response_requested": self.suppress_positive_response_requested(payload),
             "selected_group_of_dtc": self.selected_group_of_dtc(payload),
             "group_of_dtc_meaning": self.group_of_dtc_meaning(payload),
+            "controlType": self.control_type(payload),
+            "controlType_meaning": self.control_type_meaning(payload),
+            "communicationType": self.communication_type(payload),
+            "communicationType_meaning": self.communication_type_meaning(payload),
+            "reset_subfunction": self.reset_subfunction(payload),
+            "reset_subfunction_meaning": self.reset_subfunction_meaning(payload),
             "note": "Single controlled diagnostic request; no flood or repeated transmission.",
         })
         return RunnerPlan(
@@ -237,6 +287,20 @@ class DiagnosticServiceRunner(_StubRunner):
         service = self._service_id(case, parameters, None)
         if service == 0x14:
             return bytes([service]) + self._group_of_dtc(parameters, case.default_payload)
+        if service == 0x28:
+            preset = str(parameters.get("communication_control_preset") or "").strip()
+            if preset == "manual":
+                raise ValueError("manual CommunicationControl preset requires raw_payload_override in Advanced")
+            control_type = parse_byte(preset or parameters.get("control_type") or "0x00")
+            comm_source = parameters.get("manual_communication_type") if parameters.get("communication_type") == "manual" else parameters.get("communication_type")
+            communication_type = parse_byte(comm_source or "0x01")
+            return bytes([service, control_type, communication_type])
+        if service == 0x11:
+            subfunction_value = parameters.get("reset_subfunction")
+            if subfunction_value == "manual":
+                raise ValueError("manual ECU Reset preset requires raw_payload_override in Advanced")
+            subfunction = parse_byte(subfunction_value or parameters.get("subfunction") or "0x03")
+            return bytes([service, subfunction])
         subfunction_value = parameters.get("subfunction")
         if subfunction_value in (None, ""):
             default_payload = parse_hex_bytes(case.default_payload)
@@ -279,6 +343,42 @@ class DiagnosticServiceRunner(_StubRunner):
                 {"nrc": nrc},
             )
         if positive:
+            if service_id == 0x28:
+                state = str(parameters.get("vehicle_state") or "").lower()
+                disruption = str(parameters.get("communication_disruption_observed") or "unknown").lower()
+                physical_note = str(parameters.get("physical_observation_note") or "").lower()
+                if disruption == "true" or any(word in physical_note for word in ("loss", "degrad", "interrupt", "unavailable", "reset")):
+                    return RunnerResult(
+                        "FINDING_CANDIDATE",
+                        "ECU accepted CommunicationControl and evidence indicates communication disruption or physical impact.",
+                    )
+                if "operational" in state or "controlled driving" in state:
+                    return RunnerResult(
+                        "FINDING_CANDIDATE",
+                        "ECU accepted CommunicationControl in an operational/driving-state assessment; evidence required for final severity.",
+                    )
+                return RunnerResult(
+                    "OBSERVATION",
+                    "ECU accepted CommunicationControl, but operational state and disruption evidence are insufficient for an automatic finding.",
+                )
+            if service_id == 0x11:
+                state = str(parameters.get("vehicle_state") or "").lower()
+                downtime_note = str(parameters.get("ecu_downtime_recovery_note") or "").lower()
+                physical_note = str(parameters.get("physical_interruption_note") or parameters.get("physical_observation_note") or "").lower()
+                if any(word in downtime_note + " " + physical_note for word in ("reset", "reboot", "downtime", "power cycle", "interrupt", "loss", "unavailable")):
+                    return RunnerResult(
+                        "FINDING_CANDIDATE",
+                        "ECU accepted ECU Reset and evidence indicates downtime, interruption, or recovery concern.",
+                    )
+                if "operational" in state or "controlled driving" in state:
+                    return RunnerResult(
+                        "FINDING_CANDIDATE",
+                        "ECU accepted ECU Reset in an operational/driving-state assessment; evidence required for final severity.",
+                    )
+                return RunnerResult(
+                    "OBSERVATION",
+                    "ECU accepted ECU Reset, but operational state and impact evidence are insufficient for an automatic finding.",
+                )
             auth_note = str(parameters.get("authorization_state_note") or "").lower()
             dtc_update_effect = str(parameters.get("dtc_update_effect_confirmed") or "unknown").strip().lower()
             dtc_clear_effect = str(parameters.get("dtc_clear_effect_confirmed") or "unknown").strip().lower()
@@ -334,7 +434,13 @@ class DiagnosticServiceRunner(_StubRunner):
 
     @staticmethod
     def selected_subfunction_meaning(payload: bytes) -> str:
-        if len(payload) < 2 or payload[0] != 0x85:
+        if len(payload) < 2:
+            return ""
+        if payload[0] == 0x28:
+            return DiagnosticServiceRunner.control_type_meaning(payload)
+        if payload[0] == 0x11:
+            return DiagnosticServiceRunner.reset_subfunction_meaning(payload)
+        if payload[0] != 0x85:
             return ""
         subfunction = payload[1]
         base = subfunction & 0x7F
@@ -349,9 +455,60 @@ class DiagnosticServiceRunner(_StubRunner):
 
     @staticmethod
     def selected_subfunction(payload: bytes) -> str:
-        if len(payload) < 2 or payload[0] != 0x85:
+        if len(payload) < 2 or payload[0] not in {0x85, 0x28, 0x11}:
             return ""
         return f"0x{payload[1]:02X}"
+
+    @staticmethod
+    def control_type(payload: bytes) -> str:
+        if len(payload) < 2 or payload[0] != 0x28:
+            return ""
+        return f"0x{payload[1]:02X}"
+
+    @staticmethod
+    def control_type_meaning(payload: bytes) -> str:
+        if len(payload) < 2 or payload[0] != 0x28:
+            return ""
+        return {
+            0x00: "enableRxAndTx",
+            0x01: "enableRxAndDisableTx",
+            0x02: "disableRxAndEnableTx",
+            0x03: "disableRxAndTx",
+        }.get(payload[1], f"custom controlType 0x{payload[1]:02X}")
+
+    @staticmethod
+    def communication_type(payload: bytes) -> str:
+        if len(payload) < 3 or payload[0] != 0x28:
+            return ""
+        return f"0x{payload[2]:02X}"
+
+    @staticmethod
+    def communication_type_meaning(payload: bytes) -> str:
+        if len(payload) < 3 or payload[0] != 0x28:
+            return ""
+        return {
+            0x01: "normal communication messages",
+            0x02: "network management communication messages",
+            0x03: "normal and network management communication messages",
+        }.get(payload[2], f"OEM/custom communicationType 0x{payload[2]:02X}")
+
+    @staticmethod
+    def reset_subfunction(payload: bytes) -> str:
+        if len(payload) < 2 or payload[0] != 0x11:
+            return ""
+        return f"0x{payload[1]:02X}"
+
+    @staticmethod
+    def reset_subfunction_meaning(payload: bytes) -> str:
+        if len(payload) < 2 or payload[0] != 0x11:
+            return ""
+        return {
+            0x01: "hardReset",
+            0x02: "keyOffOnReset",
+            0x03: "softReset",
+            0x04: "enableRapidPowerShutDown",
+            0x05: "disableRapidPowerShutDown",
+        }.get(payload[1], f"custom resetSubfunction 0x{payload[1]:02X}")
 
     @staticmethod
     def selected_group_of_dtc(payload: bytes) -> str:
@@ -379,6 +536,10 @@ class DiagnosticServiceRunner(_StubRunner):
             return str(exc)
         if service == 0x14 and len(payload) != 4:
             return "normal ClearDiagnosticInformation format is 14 plus exactly 3 groupOfDTC bytes"
+        if service == 0x28 and len(payload) != 3:
+            return "normal CommunicationControl format is 28 <controlType> <communicationType>; this is non-standard/custom"
+        if service == 0x11 and len(payload) != 2:
+            return "normal ECU Reset format is 11 <resetSubfunction>; this is non-standard/custom"
         return ""
 
     @staticmethod
@@ -504,13 +665,291 @@ class FloodRunner(_StubRunner):
 class RobustnessRunner(_StubRunner):
     runner_name = "RobustnessRunner"
 
+    def validate(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> dict[str, str]:
+        errors = super().validate(case, parameters, safety_guard)
+        if case.case_id != "uds_31":
+            return errors
+        try:
+            payload = self.build_payload(case, parameters)
+        except ValueError as exc:
+            errors["request_payload"] = str(exc)
+            return errors
+        if not payload:
+            errors["request_payload"] = "UDS-31 payload is required"
+        payload_length = _int_param(parameters, "payload_length", 64)
+        max_allowed = _int_param(parameters, "max_payload_length", 4095)
+        if payload_length <= 0:
+            errors["payload_length"] = "Payload length must be > 0."
+        if payload_length > max_allowed:
+            errors["payload_length"] = "Payload length exceeds configured max_payload_length."
+        if len(payload) > 7 and not bool(parameters.get("isotp_enabled", True)):
+            errors["isotp_enabled"] = "ISO-TP must be enabled for payloads larger than a single CAN frame."
+        if str(parameters.get("target_service") or "") == "0x3D" and not bool(parameters.get("enable_advanced_memory_service", False)):
+            errors["enable_advanced_memory_service"] = "WriteMemoryByAddress 0x3D is advanced and disabled by default."
+        attempt_count = _int_param(parameters, "attempt_count", 1)
+        if attempt_count <= 0:
+            errors["attempt_count"] = "Attempt count must be > 0."
+        if attempt_count > safety_guard.max_messages:
+            errors["attempt_count"] = "Attempt count exceeds SafetyGuard max_messages."
+        return errors
+
+    def dry_run_preview(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
+        if case.case_id != "uds_31":
+            return super().dry_run_preview(case, parameters, safety_guard)
+        try:
+            payload = self.build_payload(case, parameters)
+            payload_text = spaced(payload[:64]) + (" ..." if len(payload) > 64 else "")
+            target_service = self.target_service(parameters)
+            meaning = self.target_service_meaning(target_service)
+        except ValueError as exc:
+            payload_text = f"<invalid: {exc}>"
+            target_service = ""
+            meaning = ""
+        return "\n".join([
+            f"Case: {case.case_id} - {case.title}",
+            "Assessment scenario: UDS oversized payload / buffer robustness.",
+            "UDS-31 is the test case ID, not necessarily service 0x31 RoutineControl.",
+            f"Session flow: {parameters.get('session_flow') or '<none>'}",
+            f"Target service: {target_service or '<invalid>'} {meaning or ''}".strip(),
+            f"Payload length: {_int_param(parameters, 'payload_length', 64)}",
+            f"Payload pattern: {parameters.get('payload_pattern') or 'random'}",
+            f"Attempt count: {_int_param(parameters, 'attempt_count', 1)}",
+            f"Final request sample: {payload_text}",
+            "Safety: manual confirmation required; bounded single/bounded-attempt execution only.",
+            "Assessment: no fixed NRC is assumed; verdict depends on safe rejection, crash/reset/no-response, and recovery evidence.",
+        ])
+
+    def plan(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerPlan:
+        if case.case_id != "uds_31":
+            return super().plan(case, parameters, safety_guard)
+        errors = self.validate(case, parameters, safety_guard)
+        if errors:
+            return RunnerPlan(
+                runner_name=self.runner_name,
+                case_id=case.case_id,
+                steps=[{"step": "validation_failed", "errors": dict(errors)}],
+                implemented=True,
+                note="UDS-31 validation failed; no transmission is allowed.",
+            )
+        payload = self.build_payload(case, parameters)
+        return RunnerPlan(
+            runner_name=self.runner_name,
+            case_id=case.case_id,
+            steps=[
+                {"step": "session_flow", "session_flow": str(parameters.get("session_flow") or "")},
+                {
+                    "step": "bounded_oversized_payload_request",
+                    "payload_sample": spaced(payload[:64]) + (" ..." if len(payload) > 64 else ""),
+                    "payload_length": len(payload),
+                    "attempt_count": _int_param(parameters, "attempt_count", 1),
+                    "note": "Bounded attempt count; no unbounded fuzzing loop.",
+                },
+            ],
+            implemented=True,
+            note="UDS-31 runner builds bounded oversized/boundary UDS payloads.",
+        )
+
+    def run(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerResult:
+        if case.case_id != "uds_31":
+            return super().run(case, parameters, safety_guard)
+        errors = self.validate(case, parameters, safety_guard)
+        if errors:
+            return RunnerResult("CONFIG_ERROR", "UDS-31 validation failed; no CAN request was sent.", {"errors": dict(errors)})
+        return RunnerResult(
+            "STUB",
+            "RobustnessRunner requires the GUI transport caller for bounded UDS-31 execution.",
+            {"plan": self.plan(case, parameters, safety_guard).as_dict(), "request_payload_sample": spaced(self.build_payload(case, parameters)[:64])},
+        )
+
+    def build_payload(self, case: TestCaseModel, parameters: dict[str, Any]) -> bytes:
+        service_text = str(parameters.get("target_service") or "0x2E")
+        resolved_service_text = self.target_service(parameters)
+        service = int(resolved_service_text[2:], 16)
+        payload_len = _int_param(parameters, "payload_length", 64)
+        if payload_len <= 0:
+            raise ValueError("Payload length must be > 0")
+        oversized = self._pattern_bytes(parameters, payload_len)
+        if service_text == "manual":
+            prefix = parse_hex_bytes(parameters.get("manual_payload_prefix", ""))
+            if not prefix:
+                manual_service = _parse_hex_int(parameters.get("manual_service_id") or "0x22", "manual_service_id", 0xFF)
+                prefix = bytes([manual_service])
+            return prefix + oversized
+        if service == 0x27:
+            return bytes([0x27, _parse_byte_param(parameters, "subfunction", 0x02)]) + oversized
+        if service == 0x2E:
+            did = _parse_hex_int(parameters.get("did_hex") or "0xF190", "did_hex", 0xFFFF)
+            return bytes([0x2E, (did >> 8) & 0xFF, did & 0xFF]) + oversized
+        if service == 0x31:
+            rid = _parse_hex_int(parameters.get("routine_identifier") or "0x0001", "routine_identifier", 0xFFFF)
+            return bytes([0x31, _parse_byte_param(parameters, "subfunction", 0x01), (rid >> 8) & 0xFF, rid & 0xFF]) + oversized
+        if service == 0x2F:
+            did = _parse_hex_int(parameters.get("did_hex") or "0xF190", "did_hex", 0xFFFF)
+            return bytes([0x2F, (did >> 8) & 0xFF, did & 0xFF, _parse_byte_param(parameters, "subfunction", 0x03)]) + oversized
+        if service == 0x34:
+            return bytes([0x34, _parse_byte_param(parameters, "data_format_identifier", 0x00), _parse_byte_param(parameters, "address_length_format_identifier", 0x44)]) + oversized
+        if service == 0x36:
+            return bytes([0x36, _parse_byte_param(parameters, "block_sequence_counter", 0x01)]) + oversized
+        if service == 0x2C:
+            did = _parse_hex_int(parameters.get("did_hex") or "0xF190", "did_hex", 0xFFFF)
+            return bytes([0x2C, 0x02, (did >> 8) & 0xFF, did & 0xFF]) + oversized
+        if service == 0x3D:
+            if not bool(parameters.get("enable_advanced_memory_service", False)):
+                raise ValueError("WriteMemoryByAddress 0x3D requires enable_advanced_memory_service=true")
+            return bytes([0x3D, _parse_byte_param(parameters, "address_length_format_identifier", 0x44)]) + oversized
+        raise ValueError(f"Unsupported UDS-31 target service 0x{service:02X}")
+
+    @staticmethod
+    def target_service(parameters: dict[str, Any]) -> str:
+        service_text = str(parameters.get("target_service") or "0x2E")
+        if service_text == "manual":
+            return f"0x{_parse_hex_int(parameters.get('manual_service_id') or '0x22', 'manual_service_id', 0xFF):02X}"
+        return f"0x{_parse_hex_int(service_text, 'target_service', 0xFF):02X}"
+
+    @staticmethod
+    def target_service_meaning(service_text: str) -> str:
+        return {
+            "0x27": "SecurityAccess sendKey",
+            "0x2E": "WriteDataByIdentifier",
+            "0x31": "RoutineControl",
+            "0x2F": "InputOutputControlByIdentifier",
+            "0x34": "RequestDownload",
+            "0x36": "TransferData",
+            "0x3D": "WriteMemoryByAddress",
+            "0x2C": "DynamicallyDefineDataIdentifier",
+        }.get(service_text, "manual service")
+
+    @staticmethod
+    def _pattern_bytes(parameters: dict[str, Any], length: int) -> bytes:
+        pattern = str(parameters.get("payload_pattern") or "random")
+        if pattern == "zero-fill":
+            return bytes([0x00] * length)
+        if pattern == "FF-fill":
+            return bytes([0xFF] * length)
+        if pattern == "incremental":
+            return bytes((idx & 0xFF) for idx in range(length))
+        if pattern == "manual pattern":
+            seed = parse_hex_bytes(parameters.get("manual_pattern_hex") or "")
+            if not seed:
+                raise ValueError("manual pattern requires manual_pattern_hex")
+            return bytes(seed[idx % len(seed)] for idx in range(length))
+        rng = __import__("random").Random(str(parameters.get("random_seed") or "uds31"))
+        return bytes(rng.randrange(0, 256) for _ in range(length))
+
 
 class CanPriorityFloodRunner(_StubRunner):
     runner_name = "CanPriorityFloodRunner"
 
+    def validate(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> dict[str, str]:
+        errors = super().validate(case, parameters, safety_guard)
+        if case.case_id != "uds_32":
+            return errors
+        rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
+        duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
+        max_frames = _int_param(parameters, "max_frames", safety_guard.max_messages)
+        try:
+            can_id = _parse_hex_int(parameters.get("can_id") or "0x000", "can_id", 0x1FFFFFFF)
+        except ValueError as exc:
+            errors["can_id"] = str(exc)
+            can_id = 0
+        if rate <= 0:
+            errors["send_rate_msgs_per_sec"] = "Send rate must be > 0 msg/s."
+        if duration <= 0:
+            errors["max_duration_seconds"] = "Duration must be > 0 seconds."
+        if max_frames <= 0:
+            errors["max_frames"] = "Max frames must be > 0."
+        if rate > safety_guard.max_send_rate:
+            errors["send_rate_msgs_per_sec"] = "Send rate exceeds SafetyGuard max_send_rate."
+        if duration > safety_guard.max_duration_seconds:
+            errors["max_duration_seconds"] = "Duration exceeds SafetyGuard max_duration_seconds."
+        if max_frames > safety_guard.max_messages:
+            errors["max_frames"] = "Max frames exceeds SafetyGuard max_messages."
+        if bool(parameters.get("is_extended_id", False)) is False and can_id > 0x7FF:
+            errors["can_id"] = "Standard CAN ID must be <= 0x7FF."
+        try:
+            self.payload(parameters)
+        except ValueError as exc:
+            errors["manual_payload"] = str(exc)
+        return errors
+
     def dry_run_preview(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
-        base = super().dry_run_preview(case, parameters, safety_guard)
-        return base + "\nScope: CAN bus-level availability/arbitration test, not a normal UDS service."
+        if case.case_id != "uds_32":
+            base = super().dry_run_preview(case, parameters, safety_guard)
+            return base + "\nScope: CAN bus-level availability/arbitration test, not a normal UDS service."
+        rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
+        duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
+        max_frames = min(_int_param(parameters, "max_frames", safety_guard.max_messages), int(rate * duration) if rate > 0 and duration > 0 else safety_guard.max_messages)
+        delay_ms = 0 if rate <= 0 else 1000.0 / rate
+        try:
+            payload = spaced(self.payload(parameters))
+        except ValueError as exc:
+            payload = f"<invalid: {exc}>"
+        return "\n".join([
+            f"Case: {case.case_id} - {case.title}",
+            "Assessment scenario: CAN bus-level availability/arbitration test, not a normal UDS service.",
+            "Lower numeric CAN IDs have higher arbitration priority; 0x000 is highest priority in standard CAN.",
+            f"CAN ID: {parameters.get('can_id') or '0x000'}",
+            f"Extended ID: {bool(parameters.get('is_extended_id', False))}",
+            f"Payload: {payload}",
+            f"Send rate: {rate:g} msg/s",
+            f"Inter-frame delay: {delay_ms:.0f} ms",
+            f"Duration: {duration:g} s",
+            f"Max frames: {max_frames}",
+            f"Execution: {'armed bounded execution' if parameters.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
+            "Safety: manual confirmation and bench mode required; bounded frames only.",
+            "Stop: stop on duration, max frames, bus error, or operator stop.",
+            "Assessment: no fixed NRC is assumed; verdict depends on observed starvation, physical impact, and recovery evidence.",
+        ])
+
+    def plan(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerPlan:
+        if case.case_id != "uds_32":
+            return super().plan(case, parameters, safety_guard)
+        errors = self.validate(case, parameters, safety_guard)
+        if errors:
+            return RunnerPlan(self.runner_name, case.case_id, [{"step": "validation_failed", "errors": dict(errors)}], True, "UDS-32 validation failed; no transmission is allowed.")
+        return RunnerPlan(
+            runner_name=self.runner_name,
+            case_id=case.case_id,
+            steps=[{
+                "step": "bounded_can_priority_availability_plan",
+                "can_id": str(parameters.get("can_id") or "0x000"),
+                "payload": spaced(self.payload(parameters)),
+                "send_rate_msgs_per_sec": _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate),
+                "duration_seconds": _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds),
+                "max_frames": _int_param(parameters, "max_frames", safety_guard.max_messages),
+            }],
+            implemented=True,
+            note="UDS-32 runner plans bounded CAN priority availability traffic.",
+        )
+
+    def run(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerResult:
+        if case.case_id != "uds_32":
+            return super().run(case, parameters, safety_guard)
+        errors = self.validate(case, parameters, safety_guard)
+        if errors:
+            return RunnerResult("CONFIG_ERROR", "UDS-32 validation failed; no CAN frame was sent.", {"errors": dict(errors)})
+        return RunnerResult(
+            "NOT_IMPLEMENTED",
+            "UDS-32 direct runner is GUI-only in this build; CLI dry-run previews are supported and non-dry CLI is blocked before CAN open.",
+            {"plan": self.plan(case, parameters, safety_guard).as_dict()},
+        )
+
+    @staticmethod
+    def payload(parameters: dict[str, Any]) -> bytes:
+        pattern = str(parameters.get("payload_pattern") or "zero")
+        if pattern in {"00 00 00 00 00 00 00 00", "zero", "zero-fill"}:
+            return bytes([0x00] * 8)
+        if pattern in {"FF FF FF FF FF FF FF FF", "ff", "FF-fill"}:
+            return bytes([0xFF] * 8)
+        if pattern == "incremental":
+            return bytes(range(8))
+        if pattern == "manual":
+            payload = parse_hex_bytes(parameters.get("manual_payload") or "")
+            if not 0 < len(payload) <= 8:
+                raise ValueError("manual payload must contain 1..8 bytes")
+            return payload
+        rng = __import__("random").Random(str(parameters.get("random_seed") or "uds32"))
+        return bytes(rng.randrange(0, 256) for _ in range(8))
 
 
 RUNNER_INTERFACES = {
@@ -541,6 +980,26 @@ def _int_param(parameters: dict[str, Any], key: str, default: int) -> int:
         return int(float(parameters.get(key, default)))
     except (TypeError, ValueError):
         return default
+
+
+def _parse_hex_int(value: Any, name: str, maximum: int) -> int:
+    raw = str(value or "").strip().replace("_", "")
+    if not raw:
+        raise ValueError(f"{name} is required")
+    try:
+        parsed = int(raw, 16)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be hex") from exc
+    if not 0 <= parsed <= maximum:
+        raise ValueError(f"{name} must be between 0x0 and 0x{maximum:X}")
+    return parsed
+
+
+def _parse_byte_param(parameters: dict[str, Any], key: str, default: int) -> int:
+    value = parameters.get(key)
+    if value in (None, ""):
+        return default
+    return parse_byte(value)
 
 
 def _uds28_preview(case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:

@@ -517,128 +517,428 @@ testcases:
       - verdict
       - raw_log_path
 
-  - name: uds29_flood_placeholder
-    type: flood
+  - name: uds29_communication_control_when_operational
+    type: diagnostic_service
     case_id: uds_29
     test_id: UDS-29
+    display_id: UDS-29
+    canonical_id: uds29_communication_control_when_operational
     title: UDS-29 CommunicationControl 0x28 While Operational
     category: UDS Test Cases
-    risk_property: Future operational CommunicationControl assessment for observed behavior, disruption, and recovery.
-    service_id: ""
-    default_payload: "<payload repeated under guard limits>"
-    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: &future_ui_parameters
+    risk_property: availability / communication availability / operational safety
+    service_id: "0x28"
+    default_payload: "28 01 01"
+    implemented: true
+    parameters:
+      session_flow: "03"
+      communication_control_preset: "0x01"
+      communication_type: "0x01"
+      manual_communication_type: "0x01"
+      vehicle_state: parked
+      raw_payload_override: ""
+      advanced_raw_payload_override_enabled: false
+      authorization_state_note: ""
+      communication_disruption_observed: unknown
+      diagnostic_observation_note: ""
+      physical_observation_note: ""
+      recovery_note: ""
+      analyst_note: ""
+    ui_parameters:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
         default: "03"
         help: "Subfunctions only: 03 or 03 02."
-      - key: service_id
-        label: Service ID
+      - key: communication_control_preset
+        label: Message preset / controlType
+        kind: combo
+        default: "0x01"
+        choices:
+          - {label: "28 00 <communicationType> — enableRxAndTx", value: "0x00"}
+          - {label: "28 01 <communicationType> — enableRxAndDisableTx", value: "0x01"}
+          - {label: "28 02 <communicationType> — disableRxAndEnableTx", value: "0x02"}
+          - {label: "28 03 <communicationType> — disableRxAndTx", value: "0x03"}
+          - {label: manual, value: manual}
+      - key: communication_type
+        label: Communication type
+        kind: combo
+        default: "0x01"
+        choices:
+          - {label: normal communication, value: "0x01"}
+          - {label: network management communication, value: "0x02"}
+          - {label: both normal and network management, value: "0x03"}
+          - {label: OEM/custom value, value: manual}
+      - key: manual_communication_type
+        label: Manual communication type
         kind: text
-        default: ""
-        help: Future UDS service ID.
-      - key: request_payload
-        label: Request payload
-        kind: textarea
-        default: ""
-        help: Future payload bytes.
+        default: "0x01"
+      - key: vehicle_state
+        label: Vehicle state
+        kind: combo
+        default: parked
+        choices:
+          - {label: parked, value: parked}
+          - {label: ignition on, value: ignition on}
+          - {label: operational/driving-state simulated, value: operational/driving-state simulated}
+          - {label: controlled driving test, value: controlled driving test}
       - key: physical_observation_note
         label: Physical observation note
         kind: textarea
         default: ""
         help: Manual observation recorded with evidence.
-      - key: max_duration_seconds
-        label: Max duration seconds
-        kind: text
-        default: "30.0"
-        required: true
-      - key: max_frame_rate
-        label: Max frame rate
-        kind: text
-        default: "10.0"
-        required: true
-      - key: tester_present_enabled
-        label: TesterPresent enabled
-        kind: checkbox
-        default: false
-      - key: tester_present_interval_seconds
-        label: TesterPresent interval seconds
-        kind: text
-        default: "2.0"
-        required: true
-    preconditions: *future_preconditions
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: &future_evidence_fields
+    preconditions:
+      - Bench/simulator or controlled vehicle mode is required.
+      - Manual confirmation is required before execution.
+      - Execute one controlled CommunicationControl request only; no flood or repeated aggressive send.
+      - Operational/driving-state testing must not be run on public roads.
+    safety_level: destructive-diagnostic
+    safety_guard:
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 10.0
+      max_frame_rate: 2.0
+      max_messages: 1
+      max_send_rate: 2.0
+      stop_button_required: true
+      stop_on_bus_error: true
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: Assessment scenario checks whether CommunicationControl 0x28 is rejected in unsafe or unauthorized operational conditions.
+    pass_criteria:
+      - ECU rejects unsafe or unauthorized CommunicationControl in the tested operational state.
+    fail_criteria:
+      - ECU accepts CommunicationControl in an operational/driving-state where it should be restricted, especially with disruption or physical impact.
+    evidence_fields:
       - timestamp
+      - display_id
+      - canonical_id
       - target_profile
       - session_flow
+      - vehicle_state
+      - controlType
+      - controlType_meaning
+      - communicationType
+      - communicationType_meaning
       - request_payload
       - response_payload
+      - response_classification
+      - communication_disruption_observed
+      - diagnostic_observation_note
+      - physical_observation_note
+      - recovery_note
+      - verdict
+      - raw_log_path
+
+  - name: uds30_ecu_reset_when_operational
+    type: diagnostic_service
+    case_id: uds_30
+    test_id: UDS-30
+    display_id: UDS-30
+    canonical_id: uds30_ecu_reset_when_operational
+    title: UDS-30 ECU Reset 0x11 While Operational
+    category: UDS Test Cases
+    risk_property: availability / function interruption / operational safety
+    service_id: "0x11"
+    default_payload: "11 03"
+    implemented: true
+    parameters:
+      session_flow: "03"
+      reset_subfunction: "0x03"
+      vehicle_state: parked
+      raw_payload_override: ""
+      advanced_raw_payload_override_enabled: false
+      recovery_delay_seconds: "2.0"
+      ecu_downtime_recovery_note: ""
+      physical_interruption_note: ""
+      diagnostic_observation_note: ""
+      analyst_note: ""
+    ui_parameters:
+      - key: session_flow
+        label: Diagnostic session flow
+        kind: textarea
+        default: "03"
+      - key: reset_subfunction
+        label: Reset subfunction
+        kind: combo
+        default: "0x03"
+        choices:
+          - {label: "11 01 — hardReset", value: "0x01"}
+          - {label: "11 02 — keyOffOnReset", value: "0x02"}
+          - {label: "11 03 — softReset", value: "0x03"}
+          - {label: "11 04 — enableRapidPowerShutDown", value: "0x04"}
+          - {label: "11 05 — disableRapidPowerShutDown", value: "0x05"}
+          - {label: manual, value: manual}
+      - key: vehicle_state
+        label: Vehicle state
+        kind: combo
+        default: parked
+        choices:
+          - {label: parked, value: parked}
+          - {label: ignition on, value: ignition on}
+          - {label: operational/driving-state simulated, value: operational/driving-state simulated}
+          - {label: controlled driving test, value: controlled driving test}
+    preconditions:
+      - Bench/simulator or controlled vehicle mode is required.
+      - Manual confirmation is required before execution.
+      - Execute one controlled ECU Reset request only by default.
+      - Operational/driving-state testing must not be run on public roads.
+    safety_level: destructive-diagnostic
+    safety_guard:
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 10.0
+      max_frame_rate: 2.0
+      max_messages: 1
+      max_send_rate: 2.0
+      stop_button_required: true
+      stop_on_bus_error: true
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: Assessment scenario checks whether ECU Reset 0x11 is rejected in unsafe or unauthorized operational conditions.
+    pass_criteria:
+      - ECU rejects reset in the tested unsafe/operational condition or remains stable with no unsafe interruption.
+    fail_criteria:
+      - ECU accepts reset in an operational/driving-state where it should be restricted, especially with function interruption or recovery concern.
+    evidence_fields:
+      - timestamp
+      - display_id
+      - canonical_id
+      - target_profile
+      - session_flow
+      - vehicle_state
+      - reset_subfunction
+      - reset_subfunction_meaning
+      - request_payload
+      - response_payload
+      - response_classification
+      - ecu_downtime_estimate
+      - recovery_status
+      - physical_interruption_note
+      - diagnostic_observation_note
+      - verdict
+      - raw_log_path
+
+  - name: uds31_oversized_payload_buffer_robustness
+    type: robustness
+    case_id: uds_31
+    test_id: UDS-31
+    display_id: UDS-31
+    canonical_id: uds31_oversized_payload_buffer_robustness
+    title: UDS-31 Oversized Payload / Buffer Robustness
+    category: UDS Test Cases
+    risk_property: availability / robustness / parser stability
+    service_id: ""
+    default_payload: "<bounded oversized UDS payload>"
+    implemented: true
+    parameters:
+      session_flow: "03"
+      target_service: "0x2E"
+      subfunction: "0x01"
+      did_hex: "0xF190"
+      routine_identifier: "0x0001"
+      block_sequence_counter: "0x01"
+      data_format_identifier: "0x00"
+      address_length_format_identifier: "0x44"
+      payload_length: "64"
+      payload_pattern: random
+      isotp_enabled: true
+      manual_service_id: "0x22"
+      manual_payload_prefix: ""
+      manual_pattern_hex: ""
+      enable_advanced_memory_service: false
+      random_seed: ""
+      attempt_count: "1"
+      max_payload_length: "4095"
+      recovery_delay_seconds: "2.0"
+      baseline_response_note: ""
+      crash_or_reset_observed: unknown
+      recovery_note: ""
+      physical_observation_note: ""
+      analyst_note: ""
+    ui_parameters:
+      - key: session_flow
+        label: Diagnostic session flow
+        kind: textarea
+        default: "03"
+      - key: target_service
+        label: Target service
+        kind: combo
+        default: "0x2E"
+        choices:
+          - {label: "0x27 SecurityAccess sendKey", value: "0x27"}
+          - {label: "0x2E WriteDataByIdentifier", value: "0x2E"}
+          - {label: "0x31 RoutineControl", value: "0x31"}
+          - {label: "0x2F InputOutputControlByIdentifier", value: "0x2F"}
+          - {label: "0x34 RequestDownload", value: "0x34"}
+          - {label: "0x36 TransferData", value: "0x36"}
+          - {label: "0x3D WriteMemoryByAddress, advanced/disabled by default", value: "0x3D"}
+          - {label: "0x2C DynamicallyDefineDataIdentifier", value: "0x2C"}
+          - {label: manual service, value: manual}
+      - key: payload_length
+        label: Payload length
+        kind: text
+        default: "64"
+        required: true
+      - key: payload_pattern
+        label: Payload pattern
+        kind: combo
+        default: random
+        choices:
+          - {label: random, value: random}
+          - {label: zero-fill, value: zero-fill}
+          - {label: FF-fill, value: FF-fill}
+          - {label: incremental, value: incremental}
+          - {label: manual pattern, value: manual pattern}
+      - key: isotp_enabled
+        label: ISO-TP enabled
+        kind: checkbox
+        default: true
+    preconditions:
+      - Bench/simulator mode is required.
+      - Manual confirmation is required before execution.
+      - Single attempt by default; attempt count is bounded.
+      - 0x3D WriteMemoryByAddress is disabled unless explicitly enabled in Advanced.
+    safety_level: destructive-diagnostic
+    safety_guard:
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 10.0
+      max_frame_rate: 1.0
+      max_messages: 3
+      max_send_rate: 1.0
+      stop_button_required: true
+      stop_on_bus_error: true
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: ECU safely rejects oversized/boundary payloads and remains responsive after the bounded assessment.
+    pass_criteria:
+      - ECU rejects safely with NRC or remains stable/responsive after bounded oversized input.
+    fail_criteria:
+      - ECU crashes, resets, loses response persistently, corrupts behavior, or requires power cycle.
+    evidence_fields:
+      - timestamp
+      - display_id
+      - canonical_id
+      - target_profile
+      - session_flow
+      - target_service
+      - target_service_meaning
+      - service_specific_parameters
+      - payload_length
+      - payload_pattern
+      - request_payload_sample
+      - response_payload
+      - response_classification
+      - timeout/no-response
+      - crash_or_reset_observed
+      - recovery_status
       - physical_observation_note
       - verdict
       - raw_log_path
 
-  - name: uds30_robustness_placeholder
-    type: robustness
-    case_id: uds_30
-    test_id: UDS-30
-    title: UDS-30 ECU Reset 0x11 While Operational
-    category: UDS Test Cases
-    risk_property: Future operational ECU Reset assessment for observed downtime, interruption, and recovery.
-    service_id: ""
-    default_payload: "<malformed or boundary payload>"
-    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: *future_ui_parameters
-    preconditions: *future_preconditions
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: *future_evidence_fields
-
-  - name: uds31_robustness_placeholder
-    type: robustness
-    case_id: uds_31
-    test_id: UDS-31
-    title: UDS-31 Oversized Payload / Buffer Robustness
-    category: UDS Test Cases
-    risk_property: Future oversized UDS payload assessment for safe rejection, no-response, reset/crash, and recovery behavior.
-    service_id: ""
-    default_payload: "<malformed or boundary payload>"
-    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: *future_ui_parameters
-    preconditions: *future_preconditions
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: *future_evidence_fields
-
-  - name: uds32_can_priority_flood_placeholder
+  - name: uds32_priority_bus_flood_arbitration_availability
     type: can_priority_flood
     case_id: uds_32
     test_id: UDS-32
-    title: UDS-32 CAN Priority Flood / Bus Availability Placeholder
+    display_id: UDS-32
+    canonical_id: uds32_priority_bus_flood_arbitration_availability
+    title: UDS-32 Priority Bus Flood / CAN Arbitration Availability
     category: UDS Test Cases
-    risk_property: Future CAN bus-level availability and arbitration behavior validation for UDS-32.
+    risk_property: availability / CAN arbitration starvation
     service_id: ""
-    default_payload: "<CAN frame pattern under guard limits>"
-    parameters: {session_flow: "", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: *future_ui_parameters
+    default_payload: "<bounded high-priority CAN frames>"
+    implemented: true
+    parameters:
+      can_id: "0x000"
+      is_extended_id: false
+      payload_pattern: "00 00 00 00 00 00 00 00"
+      manual_payload: ""
+      max_duration_seconds: "10.0"
+      send_rate_msgs_per_sec: "10.0"
+      max_frames: "100"
+      target_ids_monitored: ""
+      execution_mode: planning_dry_run
+      burst_size: "1"
+      burst_interval_ms: "0"
+      random_seed: ""
+      high_rate_confirmation: false
+      physical_observation_note: ""
+      bus_starvation_observation: ""
+      recovery_note: ""
+      analyst_note: ""
+    ui_parameters:
+      - key: can_id
+        label: CAN ID
+        kind: text
+        default: "0x000"
+        required: true
+      - key: is_extended_id
+        label: Extended CAN ID
+        kind: checkbox
+        default: false
+      - key: payload_pattern
+        label: Payload pattern
+        kind: combo
+        default: "00 00 00 00 00 00 00 00"
+        choices:
+          - {label: "00 00 00 00 00 00 00 00", value: "00 00 00 00 00 00 00 00"}
+          - {label: "FF FF FF FF FF FF FF FF", value: "FF FF FF FF FF FF FF FF"}
+          - {label: random, value: random}
+          - {label: incremental, value: incremental}
+          - {label: manual, value: manual}
+      - key: max_duration_seconds
+        label: Duration seconds
+        kind: text
+        default: "10.0"
+        required: true
+      - key: send_rate_msgs_per_sec
+        label: Send rate messages/sec
+        kind: text
+        default: "10.0"
+        required: true
+      - key: max_frames
+        label: Max frames
+        kind: text
+        default: "100"
+        required: true
     preconditions:
       - Bench/simulator mode is required.
       - UDS-32 is a CAN bus-level availability/arbitration test, not a normal UDS service.
-      - Execution is currently stubbed and performs no CAN transmission.
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Case definition is visible as a CAN bus-level test; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: *future_evidence_fields
+      - Actual sending is bounded and requires GUI Armed bounded execution with manual confirmation.
+      - CLI non-dry execution is blocked before CAN open.
+    safety_level: destructive-diagnostic
+    safety_guard:
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 10.0
+      max_frame_rate: 10.0
+      max_send_rate: 10.0
+      max_messages: 100
+      stop_button_required: true
+      stop_on_bus_error: true
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: Bus and target functions remain responsive and recover immediately after bounded high-priority CAN traffic.
+    pass_criteria:
+      - Bus/target remains responsive and recovery is immediate after bounded load.
+    fail_criteria:
+      - Target traffic starvation, persistent bus error, ECU reset, physical function interruption, or recovery failure is observed.
+    evidence_fields:
+      - timestamp
+      - display_id
+      - canonical_id
+      - can_id
+      - is_extended_id
+      - payload_pattern
+      - duration_seconds
+      - send_rate_msgs_per_sec
+      - inter_frame_delay_ms
+      - max_frames
+      - actual_frames_sent
+      - target_ids_monitored
+      - bus_error_count
+      - stop_reason
+      - physical_observation_note
+      - recovery_status
+      - verdict
+      - raw_log_path
