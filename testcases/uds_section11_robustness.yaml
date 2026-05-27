@@ -322,13 +322,208 @@ testcases:
       - verdict
       - raw_log_path
 
-  - name: uds28_flood_placeholder
+  - name: uds28_random_message_dos_like_robustness
     type: flood
     case_id: uds_28
     test_id: UDS-28
+    display_id: UDS-28
+    canonical_id: uds28_random_message_dos_like_robustness
     title: UDS-28 Random-message DoS-like Robustness Planning
     category: UDS Test Cases
-    risk_property: Future bounded random-message availability/degradation assessment for UDS-28.
+    risk_property: Bounded random-message DoS-like availability/degradation assessment for UDS-28.
+    service_id: ""
+    default_payload: "<bounded random/mixed messages under SafetyGuard limits>"
+    parameters:
+      traffic_mode: uds-targeted-isotp
+      session_flow: "03"
+      arbid_strategy: manual-range
+      manual_arbid_range: "0x700-0x7FF"
+      gap_sample_count: "20"
+      non_existing_sample_count: "20"
+      generator_mode: transport-valid random
+      manual_seed_payloads: ""
+      send_rate_msgs_per_sec: "10.0"
+      max_duration_seconds: "30.0"
+      max_messages: "300"
+      tester_present_enabled: false
+      tester_present_interval_seconds: "2.0"
+      execution_mode: planning_dry_run
+      random_seed: ""
+      valid_invalid_ratio_percent: "50"
+      payload_min_length: "1"
+      payload_max_length: "8"
+      response_required_ratio_percent: "50"
+      no_response_expected_ratio_percent: "50"
+      burst_size: "1"
+      burst_interval_ms: "0"
+      stop_on_no_response_threshold: "10"
+      physical_observation_note: ""
+      recovery_note: ""
+      analyst_note: ""
+    ui_parameters:
+      - key: traffic_mode
+        label: Traffic mode
+        kind: combo
+        default: uds-targeted-isotp
+        choices:
+          - label: UDS-targeted ISO-TP mode
+            value: uds-targeted-isotp
+          - label: CAN-ID random frame mode
+            value: can-id-random-frame
+          - label: Mixed mode
+            value: mixed
+      - key: session_flow
+        label: Diagnostic session flow
+        kind: textarea
+        default: "03"
+        help: "Subfunctions only: 03 or 03 02. Optional/informational in CAN-ID random frame mode."
+      - key: arbid_strategy
+        label: ArbID strategy
+        kind: combo
+        default: manual-range
+        choices:
+          - label: observed-only
+            value: observed-only
+          - label: selected-only
+            value: selected-only
+          - label: observed-range-with-gaps
+            value: observed-range-with-gaps
+          - label: manual-range
+            value: manual-range
+          - label: mixed observed + non-existing
+            value: mixed observed + non-existing
+      - key: manual_arbid_range
+        label: Manual ArbID range / non-existing boundary
+        kind: text
+        default: "0x700-0x7FF"
+      - key: gap_sample_count
+        label: Gap sample count
+        kind: text
+        default: "20"
+      - key: non_existing_sample_count
+        label: Non-existing sample count
+        kind: text
+        default: "20"
+      - key: generator_mode
+        label: Generator mode
+        kind: combo
+        default: transport-valid random
+        choices:
+          - label: transport-valid random
+            value: transport-valid random
+          - label: UDS-shaped valid random
+            value: UDS-shaped valid random
+          - label: UDS-shaped invalid random
+            value: UDS-shaped invalid random
+          - label: mixed valid/invalid
+            value: mixed valid/invalid
+          - label: manual seed payload list
+            value: manual seed payload list
+      - key: manual_seed_payloads
+        label: Manual seed payload list
+        kind: textarea
+        default: ""
+      - key: send_rate_msgs_per_sec
+        label: Send rate (messages/sec)
+        kind: text
+        default: "10.0"
+        required: true
+      - key: physical_observation_note
+        label: Physical observation note
+        kind: textarea
+        default: ""
+        help: Manual observation recorded with evidence.
+      - key: max_duration_seconds
+        label: Max duration seconds
+        kind: text
+        default: "30.0"
+        required: true
+      - key: max_messages
+        label: Max messages
+        kind: text
+        default: "300"
+        required: true
+      - key: tester_present_enabled
+        label: Keep diagnostic session alive with TesterPresent
+        kind: checkbox
+        default: false
+      - key: tester_present_interval_seconds
+        label: TesterPresent interval seconds
+        kind: text
+        default: "2.0"
+        required: true
+      - key: execution_mode
+        label: Execution mode
+        kind: combo
+        default: planning_dry_run
+        choices:
+          - label: Planning / dry-run only
+            value: planning_dry_run
+          - label: Armed bounded execution
+            value: armed_bounded_execution
+    preconditions: &future_preconditions
+      - Bench/simulator mode is required.
+      - Manual confirmation is required before execution once logic is implemented.
+      - Execution is currently stubbed and performs no CAN transmission.
+    safety_level: framework-placeholder
+    safety_guard: &future_safety_guard
+      bench_mode_required: true
+      manual_confirm_required: true
+      max_duration_seconds: 30.0
+      max_frame_rate: 10.0
+      max_send_rate: 10.0
+      max_messages: 300
+      stop_button_required: true
+      stop_on_bus_error: true
+      stop_on_no_response_threshold: 10
+      tester_present_enabled: false
+      tester_present_interval_seconds: 2.0
+    expected_behavior: Assessment scenario is visible and reviewable; no aggressive random/flood traffic is transmitted in this task.
+    pass_criteria: &future_pass_criteria
+      - Framework can load the case definition and show parameters without sending CAN frames.
+    fail_criteria: &future_fail_criteria
+      - Framework cannot load the case definition or attempts CAN transmission before implementation.
+    evidence_fields:
+      - timestamp
+      - display_id
+      - canonical_id
+      - target_profile
+      - traffic_mode
+      - session_flow
+      - arb_id_strategy
+      - catalog_file
+      - observed_arbid_count
+      - selected_arbid_count
+      - manual_arbid_range
+      - include_non_existing_arbid_count
+      - final_candidate_arbid_count
+      - generator_mode
+      - send_rate_msgs_per_sec
+      - inter_message_delay_ms
+      - duration_seconds
+      - max_messages
+      - tester_present_enabled
+      - tester_present_interval_seconds
+      - tester_present_message_count
+      - execution_mode
+      - safety_status
+      - stop_reason
+      - baseline_response_status
+      - during_test_response_status
+      - after_test_recovery_status
+      - physical_observation_note
+      - recovery_note
+      - analyst_note
+      - verdict
+      - raw_log_path
+
+  - name: uds29_flood_placeholder
+    type: flood
+    case_id: uds_29
+    test_id: UDS-29
+    title: UDS-29 CommunicationControl 0x28 While Operational
+    category: UDS Test Cases
+    risk_property: Future operational CommunicationControl assessment for observed behavior, disruption, and recovery.
     service_id: ""
     default_payload: "<payload repeated under guard limits>"
     parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
@@ -372,25 +567,12 @@ testcases:
         kind: text
         default: "2.0"
         required: true
-    preconditions: &future_preconditions
-      - Bench/simulator mode is required.
-      - Manual confirmation is required before execution once logic is implemented.
-      - Execution is currently stubbed and performs no CAN transmission.
+    preconditions: *future_preconditions
     safety_level: framework-placeholder
-    safety_guard: &future_safety_guard
-      bench_mode_required: true
-      manual_confirm_required: true
-      max_duration_seconds: 30.0
-      max_frame_rate: 10.0
-      stop_button_required: true
-      stop_on_bus_error: true
-      tester_present_enabled: false
-      tester_present_interval_seconds: 2.0
-    expected_behavior: Assessment scenario is visible and reviewable; no aggressive random/flood traffic is transmitted in this task.
-    pass_criteria: &future_pass_criteria
-      - Framework can load the case definition and show parameters without sending CAN frames.
-    fail_criteria: &future_fail_criteria
-      - Framework cannot load the case definition or attempts CAN transmission before implementation.
+    safety_guard: *future_safety_guard
+    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
+    pass_criteria: *future_pass_criteria
+    fail_criteria: *future_fail_criteria
     evidence_fields: &future_evidence_fields
       - timestamp
       - target_profile
@@ -400,25 +582,6 @@ testcases:
       - physical_observation_note
       - verdict
       - raw_log_path
-
-  - name: uds29_flood_placeholder
-    type: flood
-    case_id: uds_29
-    test_id: UDS-29
-    title: UDS-29 CommunicationControl 0x28 While Operational
-    category: UDS Test Cases
-    risk_property: Future operational CommunicationControl assessment for observed behavior, disruption, and recovery.
-    service_id: ""
-    default_payload: "<payload repeated under guard limits>"
-    parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
-    ui_parameters: *future_ui_parameters
-    preconditions: *future_preconditions
-    safety_level: framework-placeholder
-    safety_guard: *future_safety_guard
-    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
-    pass_criteria: *future_pass_criteria
-    fail_criteria: *future_fail_criteria
-    evidence_fields: *future_evidence_fields
 
   - name: uds30_robustness_placeholder
     type: robustness

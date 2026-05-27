@@ -427,6 +427,79 @@ class DiagnosticServiceRunner(_StubRunner):
 class FloodRunner(_StubRunner):
     runner_name = "FloodRunner"
 
+    def validate(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> dict[str, str]:
+        errors = super().validate(case, parameters, safety_guard)
+        if case.case_id != "uds_28":
+            return errors
+        rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
+        duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
+        max_messages = _int_param(parameters, "max_messages", safety_guard.max_messages)
+        if rate <= 0:
+            errors["send_rate_msgs_per_sec"] = "Send rate must be > 0 msg/s."
+        if duration <= 0:
+            errors["max_duration_seconds"] = "Duration must be > 0 seconds."
+        if max_messages <= 0:
+            errors["max_messages"] = "Max messages must be > 0."
+        if rate > safety_guard.max_send_rate:
+            errors["send_rate_msgs_per_sec"] = "Send rate exceeds SafetyGuard max_send_rate."
+        if duration > safety_guard.max_duration_seconds:
+            errors["max_duration_seconds"] = "Duration exceeds SafetyGuard max_duration_seconds."
+        if max_messages > safety_guard.max_messages:
+            errors["max_messages"] = "Max messages exceeds SafetyGuard max_messages."
+        return errors
+
+    def dry_run_preview(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
+        if case.case_id != "uds_28":
+            return super().dry_run_preview(case, parameters, safety_guard)
+        return _uds28_preview(case, parameters, safety_guard)
+
+    def plan(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerPlan:
+        if case.case_id != "uds_28":
+            return super().plan(case, parameters, safety_guard)
+        errors = self.validate(case, parameters, safety_guard)
+        if errors:
+            return RunnerPlan(
+                runner_name=self.runner_name,
+                case_id=case.case_id,
+                steps=[{"step": "validation_failed", "errors": dict(errors)}],
+                note="UDS-28 safety/planning validation failed; no transmission is allowed.",
+            )
+        rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
+        duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
+        max_messages = min(_int_param(parameters, "max_messages", safety_guard.max_messages), int(rate * duration))
+        return RunnerPlan(
+            runner_name=self.runner_name,
+            case_id=case.case_id,
+            steps=[{
+                "step": "uds28_bounded_execution_plan",
+                "traffic_mode": str(parameters.get("traffic_mode") or "uds-targeted-isotp"),
+                "arb_id_strategy": str(parameters.get("arbid_strategy") or "manual-range"),
+                "generator_mode": str(parameters.get("generator_mode") or "transport-valid random"),
+                "send_rate_msgs_per_sec": rate,
+                "duration_seconds": duration,
+                "max_messages": max_messages,
+                "message": "Dry-run preview only. GUI armed execution uses the same bounded values and SafetyGuard gates.",
+            }],
+            note="UDS-28 is planned with bounded parameters.",
+        )
+
+    def run(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerResult:
+        if case.case_id != "uds_28":
+            return super().run(case, parameters, safety_guard)
+        errors = self.validate(case, parameters, safety_guard)
+        if errors:
+            return RunnerResult(
+                verdict="CONFIG_ERROR",
+                rationale="UDS-28 safety/planning validation failed; no CAN request was sent.",
+                evidence={"errors": dict(errors)},
+            )
+        plan = self.plan(case, parameters, safety_guard)
+        return RunnerResult(
+            verdict="NOT_IMPLEMENTED",
+            rationale="UDS-28 direct runner is GUI-only in this build; CLI dry-run previews are supported and non-dry CLI is blocked before CAN open.",
+            evidence={"plan": plan.as_dict()},
+        )
+
 
 class RobustnessRunner(_StubRunner):
     runner_name = "RobustnessRunner"
@@ -454,6 +527,71 @@ def _preview_safety_line(case: TestCaseModel) -> str:
     if case.safety_level in {"destructive-diagnostic", "controlled-diagnostic"}:
         return "Safety: manual confirmation required"
     return "Safety: dry-run only"
+
+
+def _float_param(parameters: dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(parameters.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _int_param(parameters: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(float(parameters.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _uds28_preview(case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
+    traffic_mode = str(parameters.get("traffic_mode") or "uds-targeted-isotp")
+    strategy = str(parameters.get("arbid_strategy") or "manual-range")
+    rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
+    duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
+    derived_messages = max(1, int(rate * duration)) if rate > 0 and duration > 0 else 0
+    max_messages = min(_int_param(parameters, "max_messages", safety_guard.max_messages), derived_messages) if derived_messages else _int_param(parameters, "max_messages", safety_guard.max_messages)
+    delay_ms = 0 if rate <= 0 else 1000.0 / rate
+    tester_present = bool(parameters.get("tester_present_enabled", False)) and traffic_mode in {"uds-targeted-isotp", "mixed"}
+    tester_present_interval = _float_param(parameters, "tester_present_interval_seconds", safety_guard.tester_present_interval_seconds)
+    tester_present_count = int(duration // tester_present_interval) if tester_present and tester_present_interval > 0 else 0
+    catalog_loaded = bool(parameters.get("catalog_file"))
+    observed_count = _int_param(parameters, "observed_arbid_count", 0)
+    non_existing_count = _int_param(parameters, "non_existing_sample_count", 0) if strategy == "mixed observed + non-existing" else _int_param(parameters, "gap_sample_count", 0) if strategy == "observed-range-with-gaps" else 0
+    selected_count = len([item for item in str(parameters.get("selected_arbid") or "").replace(";", ",").split(",") if item.strip()])
+    final_candidates = 1 if traffic_mode == "uds-targeted-isotp" else max(0, observed_count + selected_count + non_existing_count)
+    if strategy == "manual-range":
+        final_candidates = _int_param(parameters, "manual_range_candidate_count", final_candidates)
+    generator_mode = str(parameters.get("generator_mode") or "transport-valid random")
+    generator_notes = {
+        "transport-valid random": "transport framing valid, payload content varies randomly",
+        "UDS-shaped valid random": "valid-looking UDS structures where possible",
+        "UDS-shaped invalid random": "malformed/boundary UDS payloads while transport remains valid",
+        "mixed valid/invalid": "valid-looking and invalid-looking messages are mixed",
+        "manual seed payload list": "analyst-provided seed payloads are repeated or mutated",
+    }
+    traffic_labels = {
+        "uds-targeted-isotp": "UDS-targeted ISO-TP mode",
+        "can-id-random-frame": "CAN-ID random frame mode",
+        "mixed": "Mixed mode",
+    }
+    return "\n".join([
+        f"Case: {case.case_id} - {case.title}",
+        f"Traffic mode: {traffic_labels.get(traffic_mode, traffic_mode)}",
+        f"Session flow: {parameters.get('session_flow') or '<none>'}",
+        f"ArbID strategy: {strategy if traffic_mode != 'uds-targeted-isotp' else '<not used in UDS-targeted mode>'}",
+        f"Catalog: {'loaded' if catalog_loaded else 'not loaded'}, observed count {observed_count}",
+        f"Candidate ArbIDs: final candidate count {final_candidates}, non-existing count {non_existing_count}",
+        f"Generator: {generator_mode} ({generator_notes.get(generator_mode, 'review generator settings')})",
+        f"Send rate: {rate:g} msg/s",
+        f"Inter-message delay: {delay_ms:.0f} ms",
+        f"Duration: {duration:g} s",
+        f"Max messages: {max_messages}",
+        f"TesterPresent: {'enabled' if tester_present else 'disabled'}, interval {tester_present_interval:g}s, estimated count {tester_present_count} separate",
+        f"Execution: {'armed bounded execution' if parameters.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
+        _preview_safety_line(case),
+        "Stop: Stop DoS button required; stop on duration, max messages, bus error, or operator stop.",
+        "Assessment: no fixed NRC is assumed; verdict depends on degradation, bus stability, physical impact, and recovery.",
+    ])
 
 
 def make_modular_runner(kind: str) -> ModularRunner:

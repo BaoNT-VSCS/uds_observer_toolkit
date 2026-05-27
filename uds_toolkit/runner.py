@@ -89,6 +89,15 @@ class Runner:
                     raise ConfigError(f"testcase '{tc['name']}' references unknown target '{target_name}'")
                 target = self.targets[target_name]
                 merged_tc = normalize_testcase_metadata(tc)
+                if str(merged_tc.get("case_id") or "") == "uds_28":
+                    if not self.authorized:
+                        raise ConfigError(
+                            f"testcase '{merged_tc['name']}' requires manual confirmation; use --yes-i-am-authorized or safety.authorized=true"
+                        )
+                    raise ConfigError(
+                        f"testcase '{merged_tc['name']}' CLI non-dry execution is not enabled; use GUI Armed bounded execution. "
+                        "No CAN interface was opened."
+                    )
                 if _is_modular_placeholder(merged_tc):
                     rc = max(rc, self._run_modular_placeholder_one(target, merged_tc))
                 elif wants_caringcaribou(merged_tc):
