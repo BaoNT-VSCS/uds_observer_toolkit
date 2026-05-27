@@ -387,6 +387,260 @@ def normalize_did_catalog_rows(rows: list[dict[str, Any]], *, source: str = "csv
     return normalized_rows, summary
 
 
+def normalize_arbid_hex(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.search(r"(?i)(?:0x)?([0-9A-F]{1,8})", raw)
+    if not match:
+        return raw
+    return f"0x{int(match.group(1), 16):X}"
+
+
+def _parse_arbid_int(value: Any) -> Optional[int]:
+    normalized = normalize_arbid_hex(value)
+    if re.fullmatch(r"0x[0-9A-F]+", normalized):
+        parsed = int(normalized[2:], 16)
+        if 0 <= parsed <= 0x1FFFFFFF:
+            return parsed
+    return None
+
+
+def _payload_to_text(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"[^0-9A-Fa-f]", "", raw)
+    if not compact or len(compact) % 2:
+        return raw[:64]
+    try:
+        return spaced(bytes.fromhex(compact))
+    except ValueError:
+        return raw[:64]
+
+
+def _parse_dlc_values(value: Any) -> tuple[int, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = re.findall(r"\d+", str(value))
+    values: set[int] = set()
+    for item in raw_items:
+        try:
+            parsed = int(str(item), 0)
+        except ValueError:
+            continue
+        if 0 <= parsed <= 64:
+            values.add(parsed)
+    return tuple(sorted(values))
+
+
+def _parse_sample_payloads(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        raw_items = re.split(r"\s*[|;]\s*", str(value))
+    samples: list[str] = []
+    for item in raw_items:
+        text = _payload_to_text(item)
+        if text and text not in samples:
+            samples.append(text)
+        if len(samples) >= 5:
+            break
+    return tuple(samples)
+
+
+def parse_arbid_catalog_text_line(line: str, *, source: str = "text") -> dict[str, Any]:
+    text = str(line or "").strip()
+    if not text or text.startswith("#"):
+        return {}
+    timestamp_text = ""
+    timestamp_match = re.match(r"^\(([^)]+)\)\s+", text)
+    if timestamp_match:
+        timestamp_text = timestamp_match.group(1)
+        text = text[timestamp_match.end():].strip()
+
+    candump_match = re.search(r"(?i)(?<![0-9A-F])([0-9A-F]{1,8})#([0-9A-F]*)", text)
+    if candump_match:
+        payload = _payload_to_text(candump_match.group(2))
+        return {
+            "observed_arbitration_id": normalize_arbid_hex(candump_match.group(1)),
+            "frame_count": 1,
+            "first_seen_timestamp": timestamp_text,
+            "last_seen_timestamp": timestamp_text,
+            "dlc_values": [len(payload.replace(" ", "")) // 2] if payload else [],
+            "sample_payloads": [payload] if payload else [],
+            "source": source,
+            "notes": "candump",
+        }
+
+    spaced_match = re.search(
+        r"(?i)(?<![0-9A-F])([0-9A-F]{1,8})(?![0-9A-F])\s+\[(\d{1,2})\]\s+((?:[0-9A-F]{2}\s*){0,64})",
+        text,
+    )
+    if spaced_match:
+        payload = _payload_to_text(spaced_match.group(3))
+        return {
+            "observed_arbitration_id": normalize_arbid_hex(spaced_match.group(1)),
+            "frame_count": 1,
+            "first_seen_timestamp": timestamp_text,
+            "last_seen_timestamp": timestamp_text,
+            "dlc_values": [int(spaced_match.group(2))],
+            "sample_payloads": [payload] if payload else [],
+            "source": source,
+            "notes": "candump",
+        }
+
+    simple_match = re.search(r"(?i)(?<![0-9A-F])(?:0x)?([0-9A-F]{1,8})(?![0-9A-F])", text)
+    if simple_match:
+        return {
+            "observed_arbitration_id": normalize_arbid_hex(simple_match.group(1)),
+            "frame_count": 1,
+            "source": source,
+            "notes": text if text != simple_match.group(0) else "",
+        }
+    return {"parse_status": "invalid", "parse_error": "no arbitration ID token found", "notes": text, "source": source}
+
+
+def normalize_arbid_catalog_row(row: dict[str, Any], *, source: str = "catalog") -> dict[str, Any]:
+    raw_id = _row_value(row, "observed_arbitration_id", "arbitration_id", "arb_id", "arbid", "can_id", "id", "ArbID")
+    arbid_int = _parse_arbid_int(raw_id)
+    notes = str(_row_value(row, "notes", "classification", "comment") or "").strip()
+    count_raw = _row_value(row, "frame_count", "count", "frames")
+    try:
+        frame_count = max(1, int(str(count_raw or "1"), 0))
+    except ValueError:
+        frame_count = 1
+    timestamp_first = str(_row_value(row, "first_seen_timestamp", "first_seen", "timestamp", "time") or "").strip()
+    timestamp_last = str(_row_value(row, "last_seen_timestamp", "last_seen", "timestamp", "time") or "").strip()
+    dlc_values = _parse_dlc_values(_row_value(row, "dlc_values", "dlc", "DLC"))
+    sample_payloads = _parse_sample_payloads(_row_value(row, "sample_payloads", "sample_payload", "payload", "data", "Data"))
+    extended = _row_value(row, "is_extended_id", "extended", "extended_id")
+    direction = str(_row_value(row, "direction", "source") or "").strip()
+
+    if arbid_int is None:
+        parsed = parse_arbid_catalog_text_line(notes or " ".join(str(value) for value in row.values()), source=source)
+        if parsed and parsed.get("parse_status") != "invalid":
+            return normalize_arbid_catalog_row(parsed, source=source)
+        record = ParsedArbIdRecord("", None, notes=notes, source=source, parse_status="invalid", parse_error="no arbitration ID token found")
+    else:
+        record = ParsedArbIdRecord(
+            observed_arbitration_id=f"0x{arbid_int:X}",
+            arbid_int=arbid_int,
+            frame_count=frame_count,
+            first_seen_timestamp=timestamp_first,
+            last_seen_timestamp=timestamp_last,
+            dlc_values=dlc_values,
+            sample_payloads=sample_payloads,
+            is_extended_id=str(extended).strip(),
+            direction=direction,
+            notes=notes,
+            source=source,
+        )
+    sample_text = " | ".join(record.sample_payloads)
+    dlc_text = ",".join(str(value) for value in record.dlc_values)
+    return {
+        "ArbID": record.observed_arbitration_id,
+        "Count": record.frame_count,
+        "DLC": dlc_text,
+        "Sample payload": sample_text,
+        "Notes": record.notes,
+        "observed_arbitration_id": record.observed_arbitration_id,
+        "arbid_int": record.arbid_int if record.arbid_int is not None else "",
+        "frame_count": record.frame_count,
+        "first_seen_timestamp": record.first_seen_timestamp,
+        "last_seen_timestamp": record.last_seen_timestamp,
+        "dlc_values": list(record.dlc_values),
+        "sample_payloads": list(record.sample_payloads),
+        "sample_payload": sample_text,
+        "is_extended_id": record.is_extended_id,
+        "direction": record.direction,
+        "notes": record.notes,
+        "source": record.source,
+        "parse_status": record.parse_status,
+        "parse_error": record.parse_error,
+    }
+
+
+def normalize_arbid_catalog_rows(rows: list[dict[str, Any]], *, source: str = "catalog") -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    by_id: dict[int, dict[str, Any]] = {}
+    invalid_rows = 0
+    raw_count = len(rows)
+    for row in rows:
+        normalized = normalize_arbid_catalog_row(row, source=source)
+        arbid_int = normalized.get("arbid_int")
+        if normalized.get("parse_status") == "invalid" or arbid_int in ("", None):
+            invalid_rows += 1
+            continue
+        arbid_int = int(arbid_int)
+        existing = by_id.get(arbid_int)
+        if existing is None:
+            by_id[arbid_int] = normalized
+            continue
+        existing["frame_count"] = int(existing.get("frame_count") or 0) + int(normalized.get("frame_count") or 0)
+        existing["Count"] = existing["frame_count"]
+        existing["dlc_values"] = sorted(set(existing.get("dlc_values") or []) | set(normalized.get("dlc_values") or []))
+        existing["DLC"] = ",".join(str(value) for value in existing["dlc_values"])
+        samples = list(existing.get("sample_payloads") or [])
+        for sample in normalized.get("sample_payloads") or []:
+            if sample and sample not in samples and len(samples) < 5:
+                samples.append(sample)
+        existing["sample_payloads"] = samples
+        existing["sample_payload"] = " | ".join(samples)
+        existing["Sample payload"] = existing["sample_payload"]
+        if not existing.get("first_seen_timestamp"):
+            existing["first_seen_timestamp"] = normalized.get("first_seen_timestamp", "")
+        if normalized.get("last_seen_timestamp"):
+            existing["last_seen_timestamp"] = normalized["last_seen_timestamp"]
+        if normalized.get("notes") and normalized.get("notes") not in str(existing.get("notes", "")):
+            existing["notes"] = (str(existing.get("notes") or "") + "; " + str(normalized["notes"])).strip("; ")
+            existing["Notes"] = existing["notes"]
+    normalized_rows = sorted(by_id.values(), key=lambda item: int(item["arbid_int"]))
+    arbid_values = [int(row["arbid_int"]) for row in normalized_rows]
+    summary = {
+        "raw_rows": raw_count,
+        "normalized_arbids": len(normalized_rows),
+        "failed_parse_rows": invalid_rows,
+        "min_observed_arbid": f"0x{min(arbid_values):X}" if arbid_values else "",
+        "max_observed_arbid": f"0x{max(arbid_values):X}" if arbid_values else "",
+    }
+    return normalized_rows, summary
+
+
+def load_arbid_catalog_rows(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    suffix = path.suffix.lower()
+    source = suffix.lstrip(".") or "text"
+    if suffix == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            rows = [item if isinstance(item, dict) else {"observed_arbitration_id": item} for item in data]
+        elif isinstance(data, dict):
+            raw_rows = data.get("arbid_catalog") or data.get("arb_id_catalog") or data.get("observed_arbitration_ids") or data.get("candidate_arbitration_ids") or []
+            rows = [item if isinstance(item, dict) else {"observed_arbitration_id": item} for item in raw_rows]
+    elif suffix == ".jsonl":
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                item = json.loads(line)
+                rows.append(item if isinstance(item, dict) else {"observed_arbitration_id": item})
+    elif suffix == ".csv":
+        with path.open("r", newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    else:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            parsed = parse_arbid_catalog_text_line(line, source=source)
+            if parsed:
+                rows.append(parsed)
+    normalized, summary = normalize_arbid_catalog_rows(rows, source=source)
+    summary["source_path"] = str(path)
+    return normalized, summary
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -663,6 +917,23 @@ class ParsedDidRecord:
     parse_error: str = ""
     duplicate_count: int = 1
     length_source: str = "unknown"
+
+
+@dataclass(frozen=True)
+class ParsedArbIdRecord:
+    observed_arbitration_id: str
+    arbid_int: Optional[int]
+    frame_count: int = 1
+    first_seen_timestamp: str = ""
+    last_seen_timestamp: str = ""
+    dlc_values: tuple[int, ...] = ()
+    sample_payloads: tuple[str, ...] = ()
+    is_extended_id: str = ""
+    direction: str = ""
+    notes: str = ""
+    source: str = ""
+    parse_status: str = "parsed"
+    parse_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -1783,10 +2054,18 @@ def command_preview_from_argv(argv: list[str]) -> str:
 
 def parse_external_discovery(output: str, evidence_dir: Path) -> dict[str, Any]:
     candidates = sorted({f"0x{int(m, 16):X}" for m in re.findall(r"\b(?:0x)?([0-9A-Fa-f]{3,8})\b", output)})
-    result = {"candidate_arbitration_ids": candidates}
+    arbid_catalog, arbid_summary = normalize_arbid_catalog_rows(
+        [{"observed_arbitration_id": item, "notes": "recon discovery candidate"} for item in candidates],
+        source="recon_discovery",
+    )
+    result = {"candidate_arbitration_ids": candidates, "arbid_catalog": arbid_catalog, "arbid_parse_summary": arbid_summary}
     (evidence_dir / "recon_discovery.txt").write_text(output, encoding="utf-8")
     if candidates:
         (evidence_dir / "recon_discovery.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+        with (evidence_dir / "arbid_catalog.csv").open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["ArbID", "Count", "DLC", "Sample payload", "Notes"], extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(arbid_catalog)
     return result
 
 
@@ -1964,6 +2243,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             )
             for param in case_def.parameters
         )
+        fields = section11_gui_fields(case_def, fields)
         runner_label = {
             "diagnostic_service": "DiagnosticServiceRunner",
             "flood": "FloodRunner",
@@ -1981,7 +2261,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             id=model.case_id,
             title=model.title,
             display_name=model.title,
-            category=model.category,
+            category="UDS Test Cases" if re.fullmatch(r"uds_(2[6-9]|3[0-2])", model.case_id) else model.category,
             description=description,
             runner_kind=case_def.runner_kind if case_def.implemented else "modular_stub",
             fields=fields,
@@ -2017,9 +2297,233 @@ def _gui_field_kind(kind: str) -> str:
     return "text"
 
 
+SAFETY_TUNING_FIELD_IDS = {
+    "max_duration_seconds",
+    "max_frame_rate",
+    "tester_present_enabled",
+    "tester_present_interval_seconds",
+}
+
+SECTION11_ADVANCED_FIELD_IDS = {
+    "uds_26": {"raw_payload_override", "advanced_raw_payload_override_enabled", *SAFETY_TUNING_FIELD_IDS},
+    "uds_27": {"raw_payload_override", "advanced_raw_payload_override_enabled", *SAFETY_TUNING_FIELD_IDS},
+    "uds_28": {"seed_pattern_config", "response_expectation_notes"},
+    "uds_29": {"raw_payload_override", *SAFETY_TUNING_FIELD_IDS},
+    "uds_30": {"raw_payload_override", *SAFETY_TUNING_FIELD_IDS},
+    "uds_31": {"manual_service_id", "manual_pattern_hex", "enable_advanced_memory_service", *SAFETY_TUNING_FIELD_IDS},
+}
+
+SECTION11_EVIDENCE_FIELD_IDS = {
+    "uds_26": {
+        "authorization_state_note",
+        "diagnostic_observation_note",
+        "dtc_update_effect_confirmed",
+        "analyst_note",
+        "physical_observation_note",
+    },
+    "uds_27": {
+        "authorization_state_note",
+        "dtc_state_before_note",
+        "dtc_state_after_note",
+        "dtc_clear_effect_confirmed",
+        "diagnostic_observation_note",
+        "physical_observation_note",
+        "analyst_note",
+    },
+    "uds_28": {"target_physical_function_observation_note", "recovery_note", "analyst_note"},
+    "uds_29": {
+        "authorization_state_note",
+        "communication_disruption_observed",
+        "diagnostic_observation_note",
+        "physical_observation_note",
+        "recovery_note",
+        "analyst_note",
+    },
+    "uds_30": {"ecu_downtime_recovery_note", "physical_interruption_note", "analyst_note"},
+}
+
+
+def _section11_field_group(test_id: str, field_id: str) -> str:
+    if field_id in SECTION11_ADVANCED_FIELD_IDS.get(test_id, set()):
+        return "advanced"
+    if field_id in SECTION11_EVIDENCE_FIELD_IDS.get(test_id, set()):
+        return "evidence"
+    return "main"
+
+
+def _section11_choices(values: list[tuple[str, str]]) -> tuple[Choice, ...]:
+    return tuple(Choice(label, value) for label, value in values)
+
+
+def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[FieldSpec, ...]:
+    case_id = case_def.model.case_id
+    if case_id == "uds_27":
+        out: list[FieldSpec] = []
+        for field in fields:
+            if field.id == "group_of_dtc_preset":
+                out.append(FieldSpec(
+                    field.id,
+                    "ClearDTC message preset",
+                    field.kind,
+                    field.default,
+                    field.required,
+                    field.placeholder,
+                    _section11_choices([
+                        ("14 FF FF FF - clear all DTC groups", "all"),
+                        ("custom groupOfDTC", "custom"),
+                        ("manual payload", "manual"),
+                    ]),
+                ))
+            elif field.id == "group_of_dtc":
+                out.append(FieldSpec(
+                    field.id,
+                    field.label,
+                    field.kind,
+                    field.default,
+                    field.required,
+                    field.placeholder,
+                    field.choices,
+                    visible_if=lambda p: p.get("group_of_dtc_preset") == "custom",
+                ))
+            else:
+                out.append(field)
+        return tuple(out)
+    if case_id == "uds_28":
+        return (
+            FieldSpec("session_flow", "Diagnostic session flow", "textarea", "03", False, "Subfunctions only: 03 or 03 02."),
+            FieldSpec("arbid_strategy", "ArbID source", "combo", "observed-only", True, choices=_section11_choices([
+                ("Use all observed ArbIDs", "observed-only"),
+                ("Use observed range / gaps", "observed-range-with-gaps"),
+                ("Use selected ArbID", "selected-only"),
+                ("Use manual ArbID range", "manual-range"),
+                ("Mixed observed + non-existing", "mixed observed + non-existing"),
+            ])),
+            FieldSpec("include_non_existing_arbids", "Include non-existing ArbIDs", "checkbox", False),
+            FieldSpec("manual_arbid_range", "Manual ArbID range", "text", "0x700-0x7FF", False),
+            FieldSpec("selected_arbid", "Selected ArbID", "text", "", False, visible_if=lambda p: False),
+            FieldSpec("generator_mode", "Generator mode", "combo", "transport-valid random", True, choices=_section11_choices([
+                ("transport-valid random", "transport-valid random"),
+                ("UDS-shaped valid random", "UDS-shaped valid random"),
+                ("UDS-shaped invalid random", "UDS-shaped invalid random"),
+                ("mixed valid/invalid", "mixed valid/invalid"),
+                ("manual seed payload list", "manual seed payload list"),
+            ])),
+            FieldSpec("max_duration_seconds", "Duration seconds", "text", "30.0", True),
+            FieldSpec("max_frame_rate", "Rate / message pacing", "text", "10.0", True),
+            FieldSpec("tester_present_enabled", "TesterPresent / keep session alive", "checkbox", False),
+            FieldSpec("tester_present_interval_seconds", "TesterPresent interval seconds", "text", "2.0", True),
+            FieldSpec("seed_pattern_config", "Seed / pattern config", "textarea", "", False),
+            FieldSpec("response_expectation_notes", "Response expectation notes", "textarea", "", False),
+            FieldSpec("target_physical_function_observation_note", "Target physical function observation note", "textarea", "", False),
+            FieldSpec("recovery_note", "Recovery note", "textarea", "", False),
+            FieldSpec("analyst_note", "Analyst note", "textarea", "", False),
+        )
+    if case_id == "uds_29":
+        return (
+            FieldSpec("session_flow", "Diagnostic session flow", "textarea", "03", False, "Subfunctions only: 03 or 03 02."),
+            FieldSpec("communication_control_preset", "Message preset", "combo", "0x01", True, choices=_section11_choices([
+                ("28 00 <communicationType> - enableRxAndTx", "0x00"),
+                ("28 01 <communicationType> - enableRxAndDisableTx", "0x01"),
+                ("28 02 <communicationType> - disableRxAndEnableTx", "0x02"),
+                ("28 03 <communicationType> - disableRxAndTx", "0x03"),
+                ("manual", "manual"),
+            ])),
+            FieldSpec("communication_type", "Communication type", "combo", "0x01", True, choices=_section11_choices([
+                ("0x01 normal communication messages", "0x01"),
+                ("0x02 network management communication messages", "0x02"),
+                ("0x03 normal + network management", "0x03"),
+                ("manual", "manual"),
+            ])),
+            FieldSpec("manual_communication_type", "Manual communication type", "text", "0x01", False, visible_if=lambda p: p.get("communication_type") == "manual"),
+            FieldSpec("vehicle_state", "Vehicle state", "combo", "parked", True, choices=_section11_choices([
+                ("parked", "parked"),
+                ("ignition on", "ignition on"),
+                ("operational/driving-state simulated", "operational/driving-state simulated"),
+                ("controlled driving test", "controlled driving test"),
+            ])),
+            FieldSpec("raw_payload_override", "Raw/manual payload override", "textarea", "", False),
+            FieldSpec("authorization_state_note", "Authorization/security note", "textarea", "", False),
+            FieldSpec("communication_disruption_observed", "Communication disruption observed", "combo", "unknown", False, choices=_section11_choices([("unknown", "unknown"), ("true", "true"), ("false", "false")])),
+            FieldSpec("diagnostic_observation_note", "Diagnostic observation note", "textarea", "", False),
+            FieldSpec("physical_observation_note", "Physical observation note", "textarea", "", False),
+            FieldSpec("recovery_note", "Recovery note", "textarea", "", False),
+            FieldSpec("analyst_note", "Analyst note", "textarea", "", False),
+            FieldSpec("max_duration_seconds", "Max duration seconds", "text", "30.0", True),
+            FieldSpec("max_frame_rate", "Max frame rate", "text", "10.0", True),
+            FieldSpec("tester_present_enabled", "TesterPresent enabled", "checkbox", False),
+            FieldSpec("tester_present_interval_seconds", "TesterPresent interval seconds", "text", "2.0", True),
+        )
+    if case_id == "uds_30":
+        return (
+            FieldSpec("session_flow", "Diagnostic session flow", "textarea", "03", False, "Subfunctions only: 03 or 03 02."),
+            FieldSpec("reset_subfunction", "Reset subfunction", "combo", "0x03", True, choices=_section11_choices([
+                ("11 01 - hardReset", "0x01"),
+                ("11 02 - keyOffOnReset", "0x02"),
+                ("11 03 - softReset", "0x03"),
+                ("11 04 - enableRapidPowerShutDown", "0x04"),
+                ("11 05 - disableRapidPowerShutDown", "0x05"),
+                ("manual", "manual"),
+            ])),
+            FieldSpec("vehicle_state", "Vehicle state", "combo", "parked", True, choices=_section11_choices([
+                ("parked", "parked"),
+                ("ignition on", "ignition on"),
+                ("operational/driving-state simulated", "operational/driving-state simulated"),
+                ("controlled driving test", "controlled driving test"),
+            ])),
+            FieldSpec("raw_payload_override", "Raw/manual payload override", "textarea", "", False),
+            FieldSpec("ecu_downtime_recovery_note", "ECU downtime/recovery note", "textarea", "", False),
+            FieldSpec("physical_interruption_note", "Physical interruption note", "textarea", "", False),
+            FieldSpec("analyst_note", "Analyst note", "textarea", "", False),
+            FieldSpec("max_duration_seconds", "Max duration seconds", "text", "30.0", True),
+            FieldSpec("max_frame_rate", "Max frame rate", "text", "10.0", True),
+            FieldSpec("tester_present_enabled", "TesterPresent enabled", "checkbox", False),
+            FieldSpec("tester_present_interval_seconds", "TesterPresent interval seconds", "text", "2.0", True),
+        )
+    if case_id == "uds_31":
+        return (
+            FieldSpec("session_flow", "Diagnostic session flow", "textarea", "03", False, "Subfunctions only: 03 or 03 02."),
+            FieldSpec("target_service", "Target service", "combo", "0x2E", True, choices=_section11_choices([
+                ("0x27 SecurityAccess sendKey", "0x27"),
+                ("0x2E WriteDataByIdentifier", "0x2E"),
+                ("0x31 RoutineControl", "0x31"),
+                ("0x2F InputOutputControlByIdentifier", "0x2F"),
+                ("0x34 RequestDownload", "0x34"),
+                ("0x36 TransferData", "0x36"),
+                ("0x3D WriteMemoryByAddress (advanced)", "0x3D"),
+                ("0x2C DynamicallyDefineDataIdentifier", "0x2C"),
+                ("manual service", "manual"),
+            ])),
+            FieldSpec("subfunction", "Subfunction", "text", "0x01", False, visible_if=lambda p: p.get("target_service") in {"0x27", "0x31", "0x2F"}),
+            FieldSpec("did_hex", "DID", "text", "0xF190", False, visible_if=lambda p: p.get("target_service") in {"0x2E", "0x2F", "0x2C"}),
+            FieldSpec("routine_identifier", "routineIdentifier", "text", "0x0001", False, visible_if=lambda p: p.get("target_service") == "0x31"),
+            FieldSpec("block_sequence_counter", "blockSequenceCounter", "text", "0x01", False, visible_if=lambda p: p.get("target_service") == "0x36"),
+            FieldSpec("payload_length", "Payload length", "text", "64", True),
+            FieldSpec("payload_pattern", "Payload pattern", "combo", "random", True, choices=_section11_choices([
+                ("random", "random"),
+                ("zero-fill", "zero-fill"),
+                ("FF-fill", "FF-fill"),
+                ("incremental", "incremental"),
+                ("manual pattern", "manual pattern"),
+            ])),
+            FieldSpec("isotp_enabled", "ISO-TP enabled", "checkbox", True),
+            FieldSpec("manual_service_id", "Manual service ID", "text", "0x22", False, visible_if=lambda p: p.get("target_service") == "manual"),
+            FieldSpec("manual_pattern_hex", "Manual pattern", "textarea", "", False, visible_if=lambda p: p.get("payload_pattern") == "manual pattern"),
+            FieldSpec("enable_advanced_memory_service", "Enable advanced memory service 0x3D", "checkbox", False, visible_if=lambda p: p.get("target_service") == "0x3D"),
+            FieldSpec("max_duration_seconds", "Max duration seconds", "text", "30.0", True),
+            FieldSpec("max_frame_rate", "Max frame rate", "text", "10.0", True),
+            FieldSpec("tester_present_enabled", "TesterPresent enabled", "checkbox", False),
+            FieldSpec("tester_present_interval_seconds", "TesterPresent interval seconds", "text", "2.0", True),
+        )
+    return fields
+
+
 def validate_modular_case(case_def: Any) -> Callable[[TargetProfile, dict[str, Any]], dict[str, str]]:
     def validator(_: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
         errors = validate_modular_placeholder(_, params)
+        if case_def.model.case_id == "uds_27" and params.get("group_of_dtc_preset") == "manual" and not str(params.get("raw_payload_override") or "").strip():
+            errors["raw_payload_override"] = "Manual payload preset requires raw_payload_override in Advanced."
+        if case_def.model.case_id == "uds_31" and params.get("target_service") == "0x3D" and not bool(params.get("enable_advanced_memory_service", False)):
+            errors["enable_advanced_memory_service"] = "WriteMemoryByAddress 0x3D is advanced; enable it explicitly for planning."
         if errors:
             return errors
         try:
@@ -2217,7 +2721,7 @@ def build_registry() -> list[TestDefinition]:
             build_command=command_discovery,
             validate=validate_discovery,
             parse_external=parse_external_discovery,
-            evidence_fields=("candidate_arbitration_ids", "raw_output"),
+            evidence_fields=("candidate_arbitration_ids", "arbid_catalog", "raw_output"),
         ),
         TestDefinition(
             id="recon_services",
@@ -3225,7 +3729,7 @@ class RunWorker(QThread):
         return summary
 
     def _emit_external_rows(self, parsed_extra: dict[str, Any]) -> None:
-        for key in ("candidate_arbitration_ids", "supported_services", "did_catalog"):
+        for key in ("candidate_arbitration_ids", "supported_services", "did_catalog", "arbid_catalog"):
             value = parsed_extra.get(key)
             if isinstance(value, list):
                 for row in value:
@@ -4061,9 +4565,13 @@ class UdsReconGui(QMainWindow):
         self.tests_by_id = {test.id: test for test in self.registry}
         self.current_test = self.registry[0]
         self.field_widgets: dict[str, QWidget] = {}
+        self.field_label_widgets: dict[str, QWidget] = {}
+        self.field_holder_widgets: dict[str, QWidget] = {}
         self.error_labels: dict[str, QLabel] = {}
         self.current_errors: dict[str, str] = {}
         self.did_catalog_rows: list[dict[str, Any]] = []
+        self.arbid_catalog_rows: list[dict[str, Any]] = []
+        self.arbid_catalog_summary: dict[str, Any] = {}
         self.worker: Optional[RunWorker] = None
 
         self.setWindowTitle(APP_TITLE)
@@ -4211,7 +4719,7 @@ class UdsReconGui(QMainWindow):
         layout.setContentsMargins(0, 0, 8, 0)
 
         self.category = NoWheelComboBox()
-        self.category.addItems(["Recon", "Fuzzing", "UDS Test Cases", "UDS-26..32 Framework"])
+        self.category.addItems(["Recon", "Fuzzing", "UDS Test Cases"])
         self.category.currentTextChanged.connect(self._populate_tests)
         self.test_dropdown = NoWheelComboBox()
         self.test_dropdown.currentIndexChanged.connect(self._test_dropdown_changed)
@@ -4267,6 +4775,8 @@ class UdsReconGui(QMainWindow):
         params_content_layout.addWidget(self.params_group)
         self.did_catalog_box = self._build_did_catalog_box()
         params_content_layout.addWidget(self.did_catalog_box)
+        self.arbid_catalog_box = self._build_arbid_catalog_box()
+        params_content_layout.addWidget(self.arbid_catalog_box)
         params_content_layout.addStretch(1)
 
         self.params_scroll = QScrollArea()
@@ -4293,6 +4803,31 @@ class UdsReconGui(QMainWindow):
         layout.addWidget(self.did_catalog_table)
         self.load_did_btn.clicked.connect(self._load_did_catalog)
         self.use_did_btn.clicked.connect(self._use_selected_did)
+        return box
+
+    def _build_arbid_catalog_box(self) -> QGroupBox:
+        box = QGroupBox("ArbID Catalog")
+        layout = QVBoxLayout(box)
+        row = QHBoxLayout()
+        self.load_arbid_btn = QPushButton("Load ArbID catalog")
+        self.use_arbid_btn = QPushButton("Use selected ArbID")
+        self.use_all_arbids_btn = QPushButton("Use all observed")
+        self.derive_arbid_range_btn = QPushButton("Derive observed range")
+        row.addWidget(self.load_arbid_btn)
+        row.addWidget(self.use_arbid_btn)
+        row.addWidget(self.use_all_arbids_btn)
+        row.addWidget(self.derive_arbid_range_btn)
+        layout.addLayout(row)
+        self.arbid_catalog_table = QTableWidget(0, 5)
+        self.arbid_catalog_table.setHorizontalHeaderLabels(["ArbID", "Count", "DLC", "Sample payload", "Notes"])
+        self.arbid_catalog_table.setMinimumHeight(100)
+        self.arbid_catalog_table.setMaximumHeight(170)
+        self.arbid_catalog_table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.arbid_catalog_table)
+        self.load_arbid_btn.clicked.connect(self._load_arbid_catalog)
+        self.use_arbid_btn.clicked.connect(self._use_selected_arbid)
+        self.use_all_arbids_btn.clicked.connect(self._use_all_observed_arbids)
+        self.derive_arbid_range_btn.clicked.connect(self._derive_observed_arbid_range)
         return box
 
     def _build_right_panel(self) -> QWidget:
@@ -4357,9 +4892,17 @@ class UdsReconGui(QMainWindow):
         while self.params_layout.rowCount():
             self.params_layout.removeRow(0)
         self.field_widgets.clear()
+        self.field_label_widgets.clear()
+        self.field_holder_widgets.clear()
         self.error_labels.clear()
 
         params = {field.id: field.default for field in self.current_test.fields}
+        section_forms: dict[str, QFormLayout] = {"main": self.params_layout}
+        if self.current_test.id in {f"uds_{idx}" for idx in range(26, 32)}:
+            advanced_box, advanced_form = self._build_collapsible_param_section("Advanced")
+            evidence_box, evidence_form = self._build_collapsible_param_section("Evidence / Notes")
+            section_forms["advanced"] = advanced_form
+            section_forms["evidence"] = evidence_form
         for field_spec in self.current_test.fields:
             widget = self._create_field_widget(field_spec)
             error = QLabel("")
@@ -4369,11 +4912,39 @@ class UdsReconGui(QMainWindow):
             holder_layout.setContentsMargins(0, 0, 0, 0)
             holder_layout.addWidget(widget)
             holder_layout.addWidget(error)
-            self.params_layout.addRow(field_spec.label, holder)
+            label = QLabel(field_spec.label)
+            group = _section11_field_group(self.current_test.id, field_spec.id)
+            section_forms.get(group, self.params_layout).addRow(label, holder)
             self.field_widgets[field_spec.id] = widget
+            self.field_label_widgets[field_spec.id] = label
+            self.field_holder_widgets[field_spec.id] = holder
             self.error_labels[field_spec.id] = error
+        if self.current_test.id in {f"uds_{idx}" for idx in range(26, 32)}:
+            if section_forms["advanced"].rowCount():
+                self.params_layout.addRow(advanced_box)
+            if section_forms["evidence"].rowCount():
+                self.params_layout.addRow(evidence_box)
         self.did_catalog_box.setVisible(self.current_test.id in {"uds_21", "uds_22"})
+        self.arbid_catalog_box.setVisible(self.current_test.id == "uds_28")
+        self.stop_btn.setText("Stop DoS" if self.current_test.id == "uds_28" else "Stop")
         self._apply_field_conditions(params)
+
+    def _build_collapsible_param_section(self, title: str) -> tuple[QGroupBox, QFormLayout]:
+        box = QGroupBox(title)
+        box.setCheckable(True)
+        box.setChecked(False)
+        content = QWidget()
+        form = QFormLayout(content)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(content)
+        content.setVisible(False)
+        box.toggled.connect(content.setVisible)
+        return box, form
 
     def _create_field_widget(self, spec: FieldSpec) -> QWidget:
         if spec.kind == "checkbox":
@@ -4538,18 +5109,18 @@ class UdsReconGui(QMainWindow):
         self.run_btn.setEnabled(not errors and self.worker is None)
 
     def _apply_field_conditions(self, params: dict[str, Any]) -> None:
-        for idx, field_spec in enumerate(self.current_test.fields):
+        for field_spec in self.current_test.fields:
             widget = self.field_widgets.get(field_spec.id)
             if widget is None:
                 continue
             visible = field_visible(field_spec, params)
             enabled = field_enabled(field_spec, params)
-            label_item = self.params_layout.itemAt(idx, QFormLayout.ItemRole.LabelRole)
-            field_item = self.params_layout.itemAt(idx, QFormLayout.ItemRole.FieldRole)
-            if label_item and label_item.widget():
-                label_item.widget().setVisible(visible)
-            if field_item and field_item.widget():
-                field_item.widget().setVisible(visible)
+            label_widget = self.field_label_widgets.get(field_spec.id)
+            holder_widget = self.field_holder_widgets.get(field_spec.id)
+            if label_widget:
+                label_widget.setVisible(visible)
+            if holder_widget:
+                holder_widget.setVisible(visible)
             widget.setEnabled(enabled)
 
     def _build_preview(self, target: Optional[TargetProfile], params: dict[str, Any], errors: dict[str, str]) -> str:
@@ -4585,19 +5156,21 @@ class UdsReconGui(QMainWindow):
                     for idx, step in enumerate(plan)
                 )
             elif self.current_test.runner_kind in {"modular_stub", "diagnostic_service"}:
-                guard = SafetyGuard.from_mapping(self.current_test.safety_guard | {
-                    key: params[key] for key in (
-                        "max_duration_seconds",
-                        "max_frame_rate",
-                        "tester_present_enabled",
-                        "tester_present_interval_seconds",
-                    ) if key in params
-                })
-                case_model = normalize_case_model(self.current_test.case_model)
-                runner = make_modular_runner(self.current_test.runner_interface or "diagnostic_service")
-                plan = runner.plan(case_model, params, guard).as_dict()
-                preview = runner.dry_run_preview(case_model, params, guard)
-                preview += "\n" + f"Evidence schema: {', '.join(self.current_test.evidence_schema.get('fields', []))}"
+                if self.current_test.id in {f"uds_{idx}" for idx in range(26, 32)}:
+                    preview = self._build_section11_preview(params)
+                else:
+                    guard = SafetyGuard.from_mapping(self.current_test.safety_guard | {
+                        key: params[key] for key in (
+                            "max_duration_seconds",
+                            "max_frame_rate",
+                            "tester_present_enabled",
+                            "tester_present_interval_seconds",
+                        ) if key in params
+                    })
+                    case_model = normalize_case_model(self.current_test.case_model)
+                    runner = make_modular_runner(self.current_test.runner_interface or "diagnostic_service")
+                    preview = runner.dry_run_preview(case_model, params, guard)
+                    preview += "\n" + f"Evidence schema: {', '.join(self.current_test.evidence_schema.get('fields', []))}"
             elif self.current_test.id in {"uds_23", "uds_24"}:
                 service_id = 0x34 if self.current_test.id == "uds_23" else 0x35
                 preview = format_memory_transfer_preview(service_id, params)
@@ -4615,6 +5188,174 @@ class UdsReconGui(QMainWindow):
         if errors:
             lines.append("Fix validation errors before running:\n" + "\n".join(f"- {msg}" for msg in errors.values()))
         return "\n\n".join(lines)
+
+    def _build_section11_preview(self, params: dict[str, Any]) -> str:
+        test_id = self.current_test.id
+        if test_id in {"uds_26", "uds_27"}:
+            return self._build_diagnostic_section11_preview(params)
+        if test_id == "uds_28":
+            return self._build_uds28_planning_preview(params)
+        if test_id == "uds_29":
+            return self._build_uds29_preview(params)
+        if test_id == "uds_30":
+            return self._build_uds30_preview(params)
+        if test_id == "uds_31":
+            return self._build_uds31_preview(params)
+        return "Safety: dry-run only"
+
+    def _build_diagnostic_section11_preview(self, params: dict[str, Any]) -> str:
+        case_model = normalize_case_model(self.current_test.case_model)
+        runner = make_modular_runner(self.current_test.runner_interface or "diagnostic_service")
+        try:
+            payload = runner.build_payload(case_model, params)
+            request = spaced(payload)
+        except Exception as exc:
+            payload = b""
+            request = f"<invalid: {exc}>"
+        lines = [f"Final request: {request}"]
+        if self.current_test.id == "uds_26":
+            meaning = runner.selected_subfunction_meaning(payload) if payload else ""
+            lines.append(f"Subfunction meaning: {meaning or '<not available>'}")
+            if payload and len(payload) >= 2 and (payload[1] & 0x7F) == 0x02:
+                lines.append("Warning: 85 02 may suppress DTC updates; evidence required.")
+            lines.append("Safety: manual confirmation required")
+        else:
+            group = runner.selected_group_of_dtc(payload) if payload else ""
+            meaning = runner.group_of_dtc_meaning(payload) if payload else ""
+            lines.extend([
+                f"groupOfDTC: {group or '<not available>'}",
+                f"groupOfDTC meaning: {meaning or '<not available>'}",
+                "Warning: may erase DTC evidence.",
+                "Safety: manual confirmation required",
+            ])
+        return "\n".join(lines)
+
+    def _build_uds28_planning_preview(self, params: dict[str, Any]) -> str:
+        rows = list(self.arbid_catalog_rows)
+        values = [int(row["arbid_int"]) for row in rows if str(row.get("arbid_int", "")).strip()]
+        strategy = str(params.get("arbid_strategy") or "observed-only")
+        include_non_existing = bool(params.get("include_non_existing_arbids", False))
+        if include_non_existing and strategy == "observed-only":
+            strategy = "mixed observed + non-existing"
+        lines = [
+            "Assessment scenario: UDS-28 random-message DoS-like robustness planning.",
+            "Random does not mean invalid transport by default.",
+            "Messages may be mixed: valid/invalid and response-required/no-response-expected.",
+            "ArbID catalog is used to understand observed vehicle ArbIDs.",
+            "The test may also include non-existing ArbIDs for assessment.",
+            "Verdict is based on observed degradation/recovery, not one fixed NRC.",
+            "No aggressive flood traffic is sent in this task unless a later implementation explicitly enables it.",
+            f"Generator mode: {params.get('generator_mode') or '<unset>'}",
+            f"Duration limit: {params.get('max_duration_seconds')}",
+            f"Rate / pacing limit: {params.get('max_frame_rate')}",
+            f"TesterPresent keep-alive: {bool(params.get('tester_present_enabled', False))}",
+            f"Selected ArbID strategy: {strategy}",
+            f"Include non-existing ArbIDs: {include_non_existing}",
+        ]
+        if rows:
+            lines.extend([
+                f"Observed ArbID count: {len(rows)}",
+                f"Min observed ArbID: 0x{min(values):X}" if values else "Min observed ArbID: <none>",
+                f"Max observed ArbID: 0x{max(values):X}" if values else "Max observed ArbID: <none>",
+            ])
+        else:
+            lines.append("Observed ArbID catalog: <none loaded>")
+        manual_range = str(params.get("manual_arbid_range") or "").strip()
+        if manual_range:
+            lines.append(f"Manual ArbID range: {manual_range}")
+        selected = str(params.get("selected_arbid") or "").strip()
+        if selected:
+            lines.append(f"Selected ArbID: {selected}")
+        lines.append("Safety: bounded DoS planning; no transmit")
+        return "\n".join(lines)
+
+    def _build_uds29_preview(self, params: dict[str, Any]) -> str:
+        request = self._uds29_request_text(params)
+        control_type = str(params.get("communication_control_preset") or "")
+        comm_type = str(params.get("manual_communication_type") if params.get("communication_type") == "manual" else params.get("communication_type") or "")
+        meanings = {
+            "0x00": "enableRxAndTx",
+            "0x01": "enableRxAndDisableTx",
+            "0x02": "disableRxAndEnableTx",
+            "0x03": "disableRxAndTx",
+        }
+        lines = [
+            "Assessment scenario: CommunicationControl 0x28 while operational.",
+            f"Final request: {request}",
+            f"controlType meaning: {meanings.get(control_type, '<manual>')}",
+            f"communicationType value: {comm_type or '<unset>'}",
+            "Safety: dry-run only",
+        ]
+        vehicle_state = str(params.get("vehicle_state") or "")
+        if control_type in {"0x01", "0x02", "0x03"} or "operational" in vehicle_state or "controlled driving" in vehicle_state:
+            lines.append("Warning: disabling communication or operational/driving-state assessment must not be run on public roads.")
+        return "\n".join(lines)
+
+    def _uds29_request_text(self, params: dict[str, Any]) -> str:
+        raw = str(params.get("raw_payload_override") or "").strip()
+        if raw:
+            return normalize_payload_hex(raw)
+        control_type = str(params.get("communication_control_preset") or "")
+        if control_type == "manual":
+            return "<manual payload required in Advanced>"
+        comm_text = str(params.get("manual_communication_type") if params.get("communication_type") == "manual" else params.get("communication_type") or "0x01")
+        try:
+            return spaced(bytes([0x28, parse_hex_byte(control_type, "controlType"), parse_hex_byte(comm_text, "communicationType")]))
+        except Exception as exc:
+            return f"<invalid: {exc}>"
+
+    def _build_uds30_preview(self, params: dict[str, Any]) -> str:
+        raw = str(params.get("raw_payload_override") or "").strip()
+        if raw:
+            try:
+                request = normalize_payload_hex(raw)
+            except Exception as exc:
+                request = f"<invalid: {exc}>"
+        elif params.get("reset_subfunction") == "manual":
+            request = "<manual payload required in Advanced>"
+        else:
+            try:
+                request = spaced(bytes([0x11, parse_hex_byte(params.get("reset_subfunction"), "reset_subfunction")]))
+            except Exception as exc:
+                request = f"<invalid: {exc}>"
+        lines = [
+            "Assessment scenario: ECU Reset 0x11 while operational.",
+            "0x11 is ECU Reset, not CommunicationControl.",
+            f"Final request: {request}",
+            "Safety: dry-run only",
+        ]
+        vehicle_state = str(params.get("vehicle_state") or "")
+        if "operational" in vehicle_state or "controlled driving" in vehicle_state:
+            lines.append("Warning: operational/driving-state reset assessment must not be run on public roads.")
+        return "\n".join(lines)
+
+    def _build_uds31_preview(self, params: dict[str, Any]) -> str:
+        target_service = str(params.get("manual_service_id") if params.get("target_service") == "manual" else params.get("target_service") or "")
+        dynamic: list[str] = []
+        for key, label in (
+            ("subfunction", "subfunction"),
+            ("did_hex", "DID"),
+            ("routine_identifier", "routineIdentifier"),
+            ("block_sequence_counter", "blockSequenceCounter"),
+        ):
+            if key in params and str(params.get(key) or "").strip():
+                widget = self.field_holder_widgets.get(key)
+                if widget is None or widget.isVisible():
+                    dynamic.append(f"{label}={params.get(key)}")
+        lines = [
+            "Assessment scenario: UDS oversized payload / buffer robustness.",
+            "UDS-31 is the test case ID, not necessarily service 0x31 RoutineControl.",
+            f"Target service: {target_service or '<unset>'}",
+            f"Dynamic parameters: {', '.join(dynamic) if dynamic else '<none>'}",
+            f"Payload length: {params.get('payload_length')}",
+            f"Payload pattern: {params.get('payload_pattern')}",
+            f"ISO-TP enabled: {bool(params.get('isotp_enabled', False))}",
+            "Verdict is based on safe rejection, crash/reset/no-response/recovery behavior.",
+            "Safety: dry-run only",
+        ]
+        if params.get("target_service") == "0x3D":
+            lines.append("Warning: 0x3D WriteMemoryByAddress is advanced and disabled by default.")
+        return "\n".join(lines)
 
     def _run_selected(self) -> None:
         self._refresh_validation_and_preview()
@@ -4701,7 +5442,7 @@ class UdsReconGui(QMainWindow):
 
     def _append_parsed_row(self, row: dict[str, Any]) -> None:
         step = row.get("step", "")
-        request = row.get("request_hex", row.get("service_id", row.get("did_hex", "")))
+        request = row.get("request_hex", row.get("service_id", row.get("did_hex", row.get("observed_arbitration_id", ""))))
         response = row.get("response_hex", row.get("response_raw", row.get("raw_response_hex", "")))
         nrc = row.get("nrc", "")
         meaning = row.get("nrc_meaning", row.get("service_name_if_known", ""))
@@ -4803,6 +5544,92 @@ class UdsReconGui(QMainWindow):
                 self.field_widgets["catalog_length_bytes"].setText(length)
 
         self._append_log(f"Selected DID {did or '<unknown>'}; length={length or '<unknown>'}; message={message_hex or '<empty>'}")
+        self._refresh_validation_and_preview()
+
+    def _load_arbid_catalog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load ArbID catalog",
+            self.output_dir.text(),
+            "ArbID Catalog (*.json *.jsonl *.csv *.log *.txt);;All files (*)",
+        )
+        if not path:
+            return
+        catalog_path = Path(path)
+        try:
+            rows, summary = load_arbid_catalog_rows(catalog_path)
+            normalized_path = catalog_path.with_name("parsed_arbid_catalog.csv")
+            with normalized_path.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(
+                    fh,
+                    fieldnames=["ArbID", "Count", "DLC", "Sample payload", "Notes"],
+                    extrasaction="ignore",
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            summary["parsed_arbid_catalog_csv"] = str(normalized_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "ArbID catalog error", str(exc))
+            return
+        self.arbid_catalog_rows = rows
+        self.arbid_catalog_summary = summary
+        self.arbid_catalog_table.setRowCount(0)
+        for row in rows:
+            idx = self.arbid_catalog_table.rowCount()
+            self.arbid_catalog_table.insertRow(idx)
+            self.arbid_catalog_table.setItem(idx, 0, QTableWidgetItem(str(row.get("observed_arbitration_id", ""))))
+            self.arbid_catalog_table.setItem(idx, 1, QTableWidgetItem(str(row.get("frame_count", ""))))
+            self.arbid_catalog_table.setItem(idx, 2, QTableWidgetItem(",".join(str(v) for v in row.get("dlc_values", []))))
+            self.arbid_catalog_table.setItem(idx, 3, QTableWidgetItem(str(row.get("sample_payload", ""))))
+            self.arbid_catalog_table.setItem(idx, 4, QTableWidgetItem(str(row.get("notes") or row.get("source", ""))))
+        self.arbid_catalog_table.resizeColumnsToContents()
+        self._append_log(
+            f"Loaded ArbID catalog: {catalog_path} ({summary.get('normalized_arbids', 0)} observed ArbIDs, "
+            f"{summary.get('failed_parse_rows', 0)} failed parse)"
+        )
+        self._refresh_validation_and_preview()
+
+    def _set_combo_data(self, field_id: str, value: str) -> None:
+        widget = self.field_widgets.get(field_id)
+        if isinstance(widget, QComboBox):
+            idx = widget.findData(value)
+            if idx >= 0:
+                widget.setCurrentIndex(idx)
+
+    def _set_line_text(self, field_id: str, value: str) -> None:
+        widget = self.field_widgets.get(field_id)
+        if isinstance(widget, QLineEdit):
+            widget.setText(value)
+
+    def _set_checkbox(self, field_id: str, value: bool) -> None:
+        widget = self.field_widgets.get(field_id)
+        if isinstance(widget, QCheckBox):
+            widget.setChecked(value)
+
+    def _use_selected_arbid(self) -> None:
+        row = self.arbid_catalog_table.currentRow()
+        if row < 0 or row >= len(self.arbid_catalog_rows):
+            return
+        item = normalize_arbid_catalog_row(self.arbid_catalog_rows[row])
+        arbid = str(item.get("observed_arbitration_id") or "").strip()
+        self._set_line_text("selected_arbid", arbid)
+        self._set_combo_data("arbid_strategy", "selected-only")
+        self._append_log(f"Selected ArbID {arbid or '<unknown>'} for UDS-28 planning")
+        self._refresh_validation_and_preview()
+
+    def _use_all_observed_arbids(self) -> None:
+        self._set_combo_data("arbid_strategy", "observed-only")
+        self._set_checkbox("include_non_existing_arbids", False)
+        self._append_log("UDS-28 ArbID strategy set to observed-only")
+        self._refresh_validation_and_preview()
+
+    def _derive_observed_arbid_range(self) -> None:
+        values = [int(row["arbid_int"]) for row in self.arbid_catalog_rows if str(row.get("arbid_int", "")).strip()]
+        if not values:
+            return
+        self._set_line_text("manual_arbid_range", f"0x{min(values):X}-0x{max(values):X}")
+        self._set_combo_data("arbid_strategy", "observed-range-with-gaps")
+        self._append_log(f"UDS-28 ArbID range derived as 0x{min(values):X}-0x{max(values):X}")
         self._refresh_validation_and_preview()
 
 
@@ -5047,13 +5874,13 @@ def run_self_checks() -> None:
         elif test_id == "uds_27":
             assert reg_entry.runner_kind == "diagnostic_service"
             group_field = next(field for field in reg_entry.fields if field.id == "group_of_dtc_preset")
-            assert [choice.value for choice in group_field.choices] == ["all", "custom"]
+            assert [choice.value for choice in group_field.choices] == ["all", "custom", "manual"]
             assert reg_entry.display_id == "UDS-27"
             assert reg_entry.canonical_id == "uds27_unauthenticated_clear_diagnostic_information"
             assert reg_entry.disruptive
         else:
             assert reg_entry.runner_kind == "modular_stub"
-        assert reg_entry.category == "UDS-26..32 Framework"
+        assert reg_entry.category == "UDS Test Cases"
     for test_def in registry_list:
         assert test_def.objective
         assert isinstance(test_def.fields, tuple)
@@ -5130,9 +5957,20 @@ def run_self_checks() -> None:
     csv_header = (did_dir / "did_catalog.csv").read_text(encoding="utf-8").splitlines()[0]
     assert csv_header.startswith("DID,Length,Message DID")
 
+    arbid_rows, arbid_summary = normalize_arbid_catalog_rows([
+        parse_arbid_catalog_text_line("(1.0) can0 123#11223344"),
+        parse_arbid_catalog_text_line("can0 124 [2] AA BB"),
+        {"observed_arbitration_id": "0x123", "frame_count": "2", "dlc": "8", "payload": "DE AD BE EF", "notes": "duplicate"},
+    ])
+    assert arbid_summary["normalized_arbids"] == 2
+    assert arbid_rows[0]["observed_arbitration_id"] == "0x123"
+    assert arbid_rows[0]["frame_count"] == 3
+    assert "11 22 33 44" in arbid_rows[0]["sample_payloads"]
+
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])
     gui = UdsReconGui()
+    assert "UDS-26..32 Framework" not in [gui.category.itemText(i) for i in range(gui.category.count())]
     gui.category.setCurrentText("UDS Test Cases")
     for expected_id in ("uds_23", "uds_24"):
         for i in range(gui.test_dropdown.count()):
@@ -5140,12 +5978,13 @@ def run_self_checks() -> None:
                 gui.test_dropdown.setCurrentIndex(i)
                 break
         assert not gui.dry_run.isChecked()
-    gui.category.setCurrentText("UDS-26..32 Framework")
-    assert gui.test_dropdown.count() == 7
-    first_future_id = gui.test_dropdown.itemData(0)
-    assert first_future_id == "uds_26"
-    assert gui.tests_by_id[first_future_id].runner_kind == "diagnostic_service"
-    assert "subfunction" in {field.id for field in gui.tests_by_id[first_future_id].fields}
+    future_ids = {gui.test_dropdown.itemData(i) for i in range(gui.test_dropdown.count()) if str(gui.test_dropdown.itemData(i)).startswith("uds_")}
+    assert {f"uds_{idx}" for idx in range(26, 32)}.issubset(future_ids)
+    assert gui.tests_by_id["uds_26"].runner_kind == "diagnostic_service"
+    assert "subfunction" in {field.id for field in gui.tests_by_id["uds_26"].fields}
+    gui._select_test("uds_28")
+    assert not gui.arbid_catalog_box.isHidden()
+    assert gui.stop_btn.text() == "Stop DoS"
     uds26_runner = make_modular_runner("diagnostic_service")
     uds26_case_model = normalize_case_model(registry["uds_26"].case_model)
     raw_errors = uds26_runner.validate(

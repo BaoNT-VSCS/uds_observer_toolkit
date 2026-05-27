@@ -7,7 +7,7 @@ testcases:
     canonical_id: uds26_unauthenticated_control_dtc_setting
     title: UDS-26 Unauthenticated Control DTC Setting
     description: Check whether UDS service 0x85 ControlDTCSetting is accepted without proper authorization/security access.
-    category: UDS-26..32 Framework
+    category: UDS Test Cases
     case_family: diagnostic_service
     risk_property: diagnostic integrity / system integrity
     service_id: "0x85"
@@ -159,7 +159,7 @@ testcases:
     canonical_id: uds27_unauthenticated_clear_diagnostic_information
     title: UDS-27 Unauthenticated Clear Diagnostic Information
     description: Check whether UDS service 0x14 ClearDiagnosticInformation is accepted without proper authorization/security access.
-    category: UDS-26..32 Framework
+    category: UDS Test Cases
     case_family: diagnostic_service
     risk_property: diagnostic integrity / evidence integrity
     service_id: "0x14"
@@ -326,9 +326,9 @@ testcases:
     type: flood
     case_id: uds_28
     test_id: UDS-28
-    title: UDS-28 Flood Behavior Placeholder
-    category: UDS-26..32 Framework
-    risk_property: Future bounded flood/rate behavior validation for UDS-28.
+    title: UDS-28 Random-message DoS-like Robustness Planning
+    category: UDS Test Cases
+    risk_property: Future bounded random-message availability/degradation assessment for UDS-28.
     service_id: ""
     default_payload: "<payload repeated under guard limits>"
     parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
@@ -386,7 +386,7 @@ testcases:
       stop_on_bus_error: true
       tester_present_enabled: false
       tester_present_interval_seconds: 2.0
-    expected_behavior: Case definition is visible and reviewable; execution logic will be added in a later task.
+    expected_behavior: Assessment scenario is visible and reviewable; no aggressive random/flood traffic is transmitted in this task.
     pass_criteria: &future_pass_criteria
       - Framework can load the case definition and show parameters without sending CAN frames.
     fail_criteria: &future_fail_criteria
@@ -405,9 +405,9 @@ testcases:
     type: flood
     case_id: uds_29
     test_id: UDS-29
-    title: UDS-29 Flood Behavior Placeholder
-    category: UDS-26..32 Framework
-    risk_property: Future bounded flood/rate behavior validation for UDS-29.
+    title: UDS-29 CommunicationControl 0x28 While Operational
+    category: UDS Test Cases
+    risk_property: Future operational CommunicationControl assessment for observed behavior, disruption, and recovery.
     service_id: ""
     default_payload: "<payload repeated under guard limits>"
     parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
@@ -415,7 +415,7 @@ testcases:
     preconditions: *future_preconditions
     safety_level: framework-placeholder
     safety_guard: *future_safety_guard
-    expected_behavior: Case definition is visible and reviewable; execution logic will be added in a later task.
+    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
     pass_criteria: *future_pass_criteria
     fail_criteria: *future_fail_criteria
     evidence_fields: *future_evidence_fields
@@ -424,9 +424,9 @@ testcases:
     type: robustness
     case_id: uds_30
     test_id: UDS-30
-    title: UDS-30 Robustness Placeholder
-    category: UDS-26..32 Framework
-    risk_property: Future malformed/boundary request robustness validation for UDS-30.
+    title: UDS-30 ECU Reset 0x11 While Operational
+    category: UDS Test Cases
+    risk_property: Future operational ECU Reset assessment for observed downtime, interruption, and recovery.
     service_id: ""
     default_payload: "<malformed or boundary payload>"
     parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
@@ -434,7 +434,7 @@ testcases:
     preconditions: *future_preconditions
     safety_level: framework-placeholder
     safety_guard: *future_safety_guard
-    expected_behavior: Case definition is visible and reviewable; execution logic will be added in a later task.
+    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
     pass_criteria: *future_pass_criteria
     fail_criteria: *future_fail_criteria
     evidence_fields: *future_evidence_fields
@@ -443,9 +443,9 @@ testcases:
     type: robustness
     case_id: uds_31
     test_id: UDS-31
-    title: UDS-31 Robustness Placeholder
-    category: UDS-26..32 Framework
-    risk_property: Future malformed/boundary request robustness validation for UDS-31.
+    title: UDS-31 Oversized Payload / Buffer Robustness
+    category: UDS Test Cases
+    risk_property: Future oversized UDS payload assessment for safe rejection, no-response, reset/crash, and recovery behavior.
     service_id: ""
     default_payload: "<malformed or boundary payload>"
     parameters: {session_flow: "03", service_id: "", request_payload: "", physical_observation_note: ""}
@@ -453,7 +453,7 @@ testcases:
     preconditions: *future_preconditions
     safety_level: framework-placeholder
     safety_guard: *future_safety_guard
-    expected_behavior: Case definition is visible and reviewable; execution logic will be added in a later task.
+    expected_behavior: Assessment scenario is visible and reviewable; execution logic will be added in a later task.
     pass_criteria: *future_pass_criteria
     fail_criteria: *future_fail_criteria
     evidence_fields: *future_evidence_fields
@@ -463,7 +463,7 @@ testcases:
     case_id: uds_32
     test_id: UDS-32
     title: UDS-32 CAN Priority Flood / Bus Availability Placeholder
-    category: UDS-26..32 Framework
+    category: UDS Test Cases
     risk_property: Future CAN bus-level availability and arbitration behavior validation for UDS-32.
     service_id: ""
     default_payload: "<CAN frame pattern under guard limits>"

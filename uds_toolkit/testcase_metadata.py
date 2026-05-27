@@ -314,7 +314,7 @@ def _category_from_type(case_type: str) -> str:
     if case_type == "uds_access_control_probe":
         return "Access Control"
     if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
-        return "UDS-26..32 Framework"
+        return "UDS Test Cases"
     if case_type.endswith("fuzzer"):
         return "Fuzzing"
     return "UNMAPPED"

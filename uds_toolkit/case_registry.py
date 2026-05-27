@@ -106,7 +106,7 @@ def _definition_from_yaml_case(raw: Mapping[str, Any], source: Path) -> ModularC
     model = TestCaseModel(
         case_id=case_id,
         title=str(raw.get("title") or case_id),
-        category=str(raw.get("category") or "UDS-26..32 Framework"),
+        category=str(raw.get("category") or "UDS Test Cases"),
         risk_property=str(raw.get("risk_property") or ""),
         service_id=str(raw.get("service_id") or raw.get("service") or ""),
         default_payload=str(raw.get("default_payload") or ""),
@@ -141,10 +141,10 @@ def _fallback_definitions() -> list[ModularCaseDefinition]:
     ids = [
         ("uds_26", "UDS-26 Diagnostic Service Placeholder", "diagnostic_service"),
         ("uds_27", "UDS-27 Diagnostic Service Placeholder", "diagnostic_service"),
-        ("uds_28", "UDS-28 Flood Behavior Placeholder", "flood"),
-        ("uds_29", "UDS-29 Flood Behavior Placeholder", "flood"),
-        ("uds_30", "UDS-30 Robustness Placeholder", "robustness"),
-        ("uds_31", "UDS-31 Robustness Placeholder", "robustness"),
+        ("uds_28", "UDS-28 Random-message DoS-like Robustness Planning", "flood"),
+        ("uds_29", "UDS-29 CommunicationControl 0x28 While Operational", "flood"),
+        ("uds_30", "UDS-30 ECU Reset 0x11 While Operational", "robustness"),
+        ("uds_31", "UDS-31 Oversized Payload / Buffer Robustness", "robustness"),
         ("uds_32", "UDS-32 CAN Priority Flood / Bus Availability Placeholder", "can_priority_flood"),
     ]
     out: list[ModularCaseDefinition] = []
@@ -152,7 +152,7 @@ def _fallback_definitions() -> list[ModularCaseDefinition]:
         model = TestCaseModel(
             case_id=case_id,
             title=title,
-            category="UDS-26..32 Framework",
+            category="UDS Test Cases",
             risk_property="Fallback placeholder metadata; YAML source was not found.",
             service_id="",
             default_payload="<placeholder>",

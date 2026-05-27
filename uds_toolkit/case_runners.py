@@ -65,7 +65,7 @@ class _StubRunner:
             f"Runner: {self.runner_name}",
             "Execution: placeholder only; no CAN/ISO-TP/external command will be opened.",
             f"Implemented: {plan.implemented}",
-            f"Safety guard: {safety_guard.as_dict()}",
+            _preview_safety_line(case),
         ])
 
     def plan(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerPlan:
@@ -158,7 +158,7 @@ class DiagnosticServiceRunner(_StubRunner):
             f"Suppress positive response requested: {suppress}",
             f"groupOfDTC: {group_of_dtc or '<not applicable>'}",
             f"groupOfDTC meaning: {group_meaning or '<not applicable>'}",
-            f"Safety guard: {safety_guard.as_dict()}",
+            _preview_safety_line(case),
         ]
         if self._disable_dtc_setting_requested(parameters):
             lines.append("Warning: 0x85 0x02 may suppress diagnostic trouble code updates; confirm diagnostic effect manually.")
@@ -446,6 +446,14 @@ RUNNER_INTERFACES = {
     "robustness": RobustnessRunner,
     "can_priority_flood": CanPriorityFloodRunner,
 }
+
+
+def _preview_safety_line(case: TestCaseModel) -> str:
+    if case.case_id == "uds_28":
+        return "Safety: bounded DoS planning; no transmit"
+    if case.safety_level in {"destructive-diagnostic", "controlled-diagnostic"}:
+        return "Safety: manual confirmation required"
+    return "Safety: dry-run only"
 
 
 def make_modular_runner(kind: str) -> ModularRunner:
