@@ -119,16 +119,17 @@ class DiagnosticServiceRunner(_StubRunner):
             errors["request_payload"] = str(exc)
         else:
             raw_override = str(parameters.get("raw_payload_override") or "").strip()
-            advanced_override = bool(parameters.get("advanced_raw_payload_override_enabled", False))
             if not payload:
                 errors["request_payload"] = "diagnostic request payload is required"
+            elif raw_override:
+                pass
             elif len(payload) < 2 and case.service_id.lower() in {"0x85", "85"}:
                 errors["subfunction"] = "ControlDTCSetting requires a subfunction byte"
-            elif self._service_id(case, parameters, payload[0]) == 0x14 and len(payload) != 4 and not (raw_override and advanced_override):
+            elif self._service_id(case, parameters, payload[0]) == 0x14 and len(payload) != 4:
                 errors["group_of_dtc"] = "ClearDiagnosticInformation requires service 0x14 plus exactly 3 groupOfDTC bytes"
-            elif self._service_id(case, parameters, payload[0]) == 0x28 and len(payload) != 3 and not (raw_override and advanced_override):
+            elif self._service_id(case, parameters, payload[0]) == 0x28 and len(payload) != 3:
                 errors["request_payload"] = "CommunicationControl normally requires 28 <controlType> <communicationType>; shorter/custom payloads require advanced_raw_payload_override_enabled=true"
-            elif self._service_id(case, parameters, payload[0]) == 0x11 and len(payload) != 2 and not (raw_override and advanced_override):
+            elif self._service_id(case, parameters, payload[0]) == 0x11 and len(payload) != 2:
                 errors["request_payload"] = "ECU Reset normally requires 11 <resetSubfunction>; custom payloads require advanced_raw_payload_override_enabled=true"
         return errors
 
@@ -196,7 +197,7 @@ class DiagnosticServiceRunner(_StubRunner):
         if self._disable_dtc_setting_requested(parameters):
             lines.append("Warning: 0x85 0x02 may suppress diagnostic trouble code updates; confirm diagnostic effect manually.")
         if self._clear_diagnostic_information_requested(case, parameters):
-            lines.append("Warning: this test may erase diagnostic evidence / DTC records. Manual confirmation is required for non-dry execution.")
+            lines.append("Note: this request may erase diagnostic evidence / DTC records; ECU behavior is recorded as observed.")
         if case.case_id == "uds_29" and (
             str(parameters.get("communication_control_preset") or "") in {"0x01", "0x02", "0x03"}
             or "operational" in str(parameters.get("vehicle_state") or "")
@@ -276,12 +277,6 @@ class DiagnosticServiceRunner(_StubRunner):
             payload = parse_hex_bytes(raw_override)
             if not payload:
                 raise ValueError("raw payload override is empty")
-            service = self._service_id(case, parameters, payload[0])
-            advanced_override = bool(parameters.get("advanced_raw_payload_override_enabled", False))
-            if service == 0x14 and not advanced_override:
-                raise ValueError("UDS-27 raw payload override requires advanced_raw_payload_override_enabled=true")
-            if payload[0] != service and not advanced_override:
-                raise ValueError(f"raw payload override must start with service 0x{service:02X}")
             return payload
 
         service = self._service_id(case, parameters, None)
@@ -684,8 +679,6 @@ class RobustnessRunner(_StubRunner):
             errors["payload_length"] = "Payload length exceeds configured max_payload_length."
         if len(payload) > 7 and not bool(parameters.get("isotp_enabled", True)):
             errors["isotp_enabled"] = "ISO-TP must be enabled for payloads larger than a single CAN frame."
-        if str(parameters.get("target_service") or "") == "0x3D" and not bool(parameters.get("enable_advanced_memory_service", False)):
-            errors["enable_advanced_memory_service"] = "WriteMemoryByAddress 0x3D is advanced and disabled by default."
         attempt_count = _int_param(parameters, "attempt_count", 1)
         if attempt_count <= 0:
             errors["attempt_count"] = "Attempt count must be > 0."
@@ -715,7 +708,7 @@ class RobustnessRunner(_StubRunner):
             f"Payload pattern: {parameters.get('payload_pattern') or 'random'}",
             f"Attempt count: {_int_param(parameters, 'attempt_count', 1)}",
             f"Final request sample: {payload_text}",
-            "Safety: manual confirmation required; bounded single/bounded-attempt execution only.",
+            "Operational limits: bounded single/bounded-attempt execution only.",
             "Assessment: no fixed NRC is assumed; verdict depends on safe rejection, crash/reset/no-response, and recovery evidence.",
         ])
 
@@ -794,8 +787,6 @@ class RobustnessRunner(_StubRunner):
             did = _parse_hex_int(parameters.get("did_hex") or "0xF190", "did_hex", 0xFFFF)
             return bytes([0x2C, 0x02, (did >> 8) & 0xFF, did & 0xFF]) + oversized
         if service == 0x3D:
-            if not bool(parameters.get("enable_advanced_memory_service", False)):
-                raise ValueError("WriteMemoryByAddress 0x3D requires enable_advanced_memory_service=true")
             return bytes([0x3D, _parse_byte_param(parameters, "address_length_format_identifier", 0x44)]) + oversized
         raise ValueError(f"Unsupported UDS-31 target service 0x{service:02X}")
 
@@ -896,7 +887,7 @@ class CanPriorityFloodRunner(_StubRunner):
             f"Duration: {duration:g} s",
             f"Max frames: {max_frames}",
             f"Execution: {'armed bounded execution' if parameters.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
-            "Safety: manual confirmation and bench mode required; bounded frames only.",
+            "Operational limits: bounded frames only; stop on duration, max frames, bus error, or operator stop.",
             "Stop: stop on duration, max frames, bus error, or operator stop.",
             "Assessment: no fixed NRC is assumed; verdict depends on observed starvation, physical impact, and recovery evidence.",
         ])
@@ -962,9 +953,9 @@ RUNNER_INTERFACES = {
 
 def _preview_safety_line(case: TestCaseModel) -> str:
     if case.case_id == "uds_28":
-        return "Safety: bounded DoS planning; no transmit"
+        return "Operational limits: bounded DoS/availability traffic"
     if case.safety_level in {"destructive-diagnostic", "controlled-diagnostic"}:
-        return "Safety: manual confirmation required"
+        return "Execution: sends configured request and records ECU response"
     return "Safety: dry-run only"
 
 

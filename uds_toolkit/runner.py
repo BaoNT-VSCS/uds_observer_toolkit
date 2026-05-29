@@ -90,19 +90,11 @@ class Runner:
                 target = self.targets[target_name]
                 merged_tc = normalize_testcase_metadata(tc)
                 if str(merged_tc.get("case_id") or "") == "uds_28":
-                    if not self.authorized:
-                        raise ConfigError(
-                            f"testcase '{merged_tc['name']}' requires manual confirmation; use --yes-i-am-authorized or safety.authorized=true"
-                        )
                     raise ConfigError(
                         f"testcase '{merged_tc['name']}' CLI non-dry execution is not enabled; use GUI Armed bounded execution. "
                         "No CAN interface was opened."
                     )
                 if str(merged_tc.get("case_id") or "") == "uds_32":
-                    if not self.authorized:
-                        raise ConfigError(
-                            f"testcase '{merged_tc['name']}' requires manual confirmation; use --yes-i-am-authorized or safety.authorized=true"
-                        )
                     raise ConfigError(
                         f"testcase '{merged_tc['name']}' CLI non-dry execution is not enabled; use GUI Armed bounded execution. "
                         "No CAN interface was opened."
@@ -116,11 +108,6 @@ class Runner:
                         errors = self._preflight_modular_case(merged_tc)
                         if errors:
                             raise ConfigError(f"testcase '{merged_tc['name']}' failed modular preflight: {errors}")
-                        guard = SafetyGuard.from_mapping(merged_tc.get("safety_guard", {}))
-                        if guard.manual_confirm_required and not self.authorized:
-                            raise ConfigError(
-                                f"testcase '{merged_tc['name']}' requires manual confirmation; use --yes-i-am-authorized or safety.authorized=true"
-                            )
                     native_cases.append((target, merged_tc))
             if native_cases:
                 can_mod, bus = open_bus(self.can_cfg)

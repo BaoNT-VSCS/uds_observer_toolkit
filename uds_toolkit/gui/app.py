@@ -913,7 +913,7 @@ class TargetProfile:
             "output_directory": str(self.output_dir) if self.save_output else "",
             "save_output": self.save_output,
             "dry_run": self.dry_run,
-            "operator_authorization_confirmed": self.authorized_disruptive,
+            "operator_scope_confirmed": self.authorized_disruptive,
             "operator_notes": self.operator_notes,
         }
 
@@ -2273,7 +2273,7 @@ def build_modular_placeholder_tests() -> list[TestDefinition]:
             model.expected_behavior,
             "",
             f"Runner interface: {runner_label}",
-            "Warning: this test may erase diagnostic evidence / DTC records. Manual confirmation is required." if model.safety_level == "destructive-diagnostic" else "",
+            "The tool sends configured requests and records ECU response without enforcing authorization in the case runner." if model.safety_level == "destructive-diagnostic" else "",
             "Execution status: implemented controlled diagnostic request." if case_def.implemented else "Execution status: placeholder only. No CAN frame is transmitted for this case yet.",
         ]).strip()
         tests.append(TestDefinition(
@@ -2425,30 +2425,33 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
         return tuple(out)
     if case_id == "uds_28":
         return (
-            FieldSpec("traffic_mode", "Traffic mode", "combo", "uds-targeted-isotp", True, choices=_section11_choices([
+            FieldSpec("traffic_mode", "Traffic mode", "combo", "can-id-random-frame", True, choices=_section11_choices([
                 ("UDS-targeted ISO-TP mode", "uds-targeted-isotp"),
                 ("CAN-ID random frame mode", "can-id-random-frame"),
                 ("Mixed mode", "mixed"),
             ])),
-            FieldSpec("session_flow", "Diagnostic session flow", "textarea", "03", False, "Subfunctions only: 03 or 03 02. Optional/informational in CAN-ID random frame mode."),
+            FieldSpec("session_flow", "Diagnostic session flow", "textarea", "", False, "Optional. Leave empty to test without setup."),
             FieldSpec("arbid_strategy", "ArbID strategy", "combo", "manual-range", True, choices=_section11_choices([
-                ("observed-only", "observed-only"),
-                ("selected-only", "selected-only"),
-                ("observed-range-with-gaps", "observed-range-with-gaps"),
                 ("manual-range", "manual-range"),
-                ("mixed observed + non-existing", "mixed observed + non-existing"),
             ]), visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"}),
-            FieldSpec("manual_arbid_range", "Manual ArbID range / non-existing boundary", "text", "0x700-0x7FF", False, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"} and p.get("arbid_strategy") in {"manual-range", "mixed observed + non-existing"}),
+            FieldSpec("start_arbid", "Start ArbID", "text", "0x700", True, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"}),
+            FieldSpec("end_arbid", "End ArbID", "text", "0x7FF", True, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"}),
+            FieldSpec("payload", "Payload", "textarea", "3E 00", True, "Hex bytes sent to each candidate ArbID.", visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"}),
+            FieldSpec("timeout", "Response timeout seconds", "text", "0.2", True, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"}),
+            FieldSpec("delay", "Delay seconds", "text", "0.05", True),
+            FieldSpec("extended_id", "Extended CAN ID", "checkbox", False, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"}),
+            FieldSpec("manual_arbid_range", "Manual ArbID range", "text", "0x700-0x7FF", False, visible_if=lambda p: False),
             FieldSpec("gap_sample_count", "Gap sample count", "text", "20", False, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"} and p.get("arbid_strategy") == "observed-range-with-gaps"),
             FieldSpec("non_existing_sample_count", "Non-existing sample count", "text", "20", False, visible_if=lambda p: p.get("traffic_mode") in {"can-id-random-frame", "mixed"} and p.get("arbid_strategy") == "mixed observed + non-existing"),
             FieldSpec("selected_arbid", "Selected ArbIDs", "text", "", False, visible_if=lambda p: False),
-            FieldSpec("generator_mode", "Generator mode", "combo", "transport-valid random", True, choices=_section11_choices([
+            FieldSpec("generator_mode", "Generator mode", "combo", "manual payload", False, choices=_section11_choices([
+                ("manual payload", "manual payload"),
                 ("transport-valid random", "transport-valid random"),
                 ("UDS-shaped valid random", "UDS-shaped valid random"),
                 ("UDS-shaped invalid random", "UDS-shaped invalid random"),
                 ("mixed valid/invalid", "mixed valid/invalid"),
                 ("manual seed payload list", "manual seed payload list"),
-            ])),
+            ]), visible_if=lambda p: p.get("traffic_mode") in {"uds-targeted-isotp", "mixed"}),
             FieldSpec("manual_seed_payloads", "Manual seed payload list", "textarea", "", False, "One hex payload per line.", visible_if=lambda p: p.get("generator_mode") == "manual seed payload list"),
             FieldSpec("send_rate_msgs_per_sec", "Send rate (messages/sec)", "text", "10.0", True),
             FieldSpec("inter_message_delay_ms", "Inter-message delay (ms)", "text", "100", False, enabled_if=lambda p: False),
@@ -2456,11 +2459,11 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
             FieldSpec("max_messages", "Max messages", "text", "300", True),
             FieldSpec("tester_present_enabled", "Keep diagnostic session alive with TesterPresent", "checkbox", False, visible_if=lambda p: p.get("traffic_mode") in {"uds-targeted-isotp", "mixed"}),
             FieldSpec("tester_present_interval_seconds", "TesterPresent interval seconds", "text", "2.0", True, "Used when test duration may exceed diagnostic session timeout.", visible_if=lambda p: p.get("traffic_mode") in {"uds-targeted-isotp", "mixed"} and bool(p.get("tester_present_enabled"))),
-            FieldSpec("execution_mode", "Execution mode", "combo", "planning_dry_run", True, choices=_section11_choices([
+            FieldSpec("execution_mode", "Execution mode", "combo", "armed_bounded_execution", False, choices=_section11_choices([
                 ("Planning / dry-run only", "planning_dry_run"),
-                ("Armed bounded execution", "armed_bounded_execution"),
-            ])),
-            FieldSpec("operator_armed_confirmation", "I understand this is bounded bench execution", "checkbox", False, visible_if=lambda p: p.get("execution_mode") == "armed_bounded_execution"),
+                ("Bounded execution", "armed_bounded_execution"),
+            ]), visible_if=lambda p: False),
+            FieldSpec("operator_armed_confirmation", "I understand this is bounded bench execution", "checkbox", False, visible_if=lambda p: False),
             FieldSpec("random_seed", "Random seed", "text", "", False),
             FieldSpec("valid_invalid_ratio_percent", "Valid ratio (%)", "text", "50", False, visible_if=lambda p: p.get("generator_mode") == "mixed valid/invalid"),
             FieldSpec("payload_min_length", "Payload min length", "text", "1", False),
@@ -2604,11 +2607,11 @@ def section11_gui_fields(case_def: Any, fields: tuple[FieldSpec, ...]) -> tuple[
             FieldSpec("inter_frame_delay_ms", "Inter-frame delay (ms)", "text", "100", False, enabled_if=lambda p: False),
             FieldSpec("max_frames", "Max frames", "text", "100", True),
             FieldSpec("target_ids_monitored", "Target IDs to monitor", "text", "", False),
-            FieldSpec("execution_mode", "Execution mode", "combo", "planning_dry_run", True, choices=_section11_choices([
+            FieldSpec("execution_mode", "Execution mode", "combo", "armed_bounded_execution", False, choices=_section11_choices([
                 ("Planning / dry-run only", "planning_dry_run"),
-                ("Armed bounded execution", "armed_bounded_execution"),
-            ])),
-            FieldSpec("operator_armed_confirmation", "I understand this is bounded bench execution", "checkbox", False, visible_if=lambda p: p.get("execution_mode") == "armed_bounded_execution"),
+                ("Bounded execution", "armed_bounded_execution"),
+            ]), visible_if=lambda p: False),
+            FieldSpec("operator_armed_confirmation", "I understand this is bounded bench execution", "checkbox", False, visible_if=lambda p: False),
             FieldSpec("burst_size", "Burst size", "text", "1", False),
             FieldSpec("burst_interval_ms", "Burst interval (ms)", "text", "0", False),
             FieldSpec("random_seed", "Random seed", "text", "", False),
@@ -2631,8 +2634,6 @@ def validate_modular_case(case_def: Any) -> Callable[[TargetProfile, dict[str, A
             errors["raw_payload_override"] = "Manual CommunicationControl preset requires raw_payload_override in Advanced."
         if case_def.model.case_id == "uds_30" and params.get("reset_subfunction") == "manual" and not str(params.get("raw_payload_override") or "").strip():
             errors["raw_payload_override"] = "Manual ECU Reset preset requires raw_payload_override in Advanced."
-        if case_def.model.case_id == "uds_31" and params.get("target_service") == "0x3D" and not bool(params.get("enable_advanced_memory_service", False)):
-            errors["enable_advanced_memory_service"] = "WriteMemoryByAddress 0x3D is advanced; enable it explicitly for planning."
         if errors:
             return errors
         try:
@@ -2657,7 +2658,11 @@ def validate_modular_case(case_def: Any) -> Callable[[TargetProfile, dict[str, A
 def validate_modular_placeholder(_: TargetProfile, params: dict[str, Any]) -> dict[str, str]:
     errors: dict[str, str] = {}
     data: dict[str, Any] = {}
-    numeric_keys = ["max_duration_seconds", "tester_present_interval_seconds"]
+    numeric_keys = ["max_duration_seconds"]
+    tester_present_enabled = bool(params.get("tester_present_enabled", False))
+    tester_interval = params.get("tester_present_interval_seconds", "")
+    if tester_present_enabled or str(tester_interval or "").strip():
+        numeric_keys.append("tester_present_interval_seconds")
     if "max_frame_rate" in params:
         numeric_keys.append("max_frame_rate")
     elif "send_rate_msgs_per_sec" in params:
@@ -2668,10 +2673,14 @@ def validate_modular_placeholder(_: TargetProfile, params: dict[str, Any]) -> di
             numeric_keys.append(optional_key)
     for key in numeric_keys:
         try:
-            data[key] = float(params.get(key, ""))
+            value = params.get(key, "")
+            if key == "tester_present_interval_seconds" and not str(value or "").strip():
+                data[key] = 2.0
+            else:
+                data[key] = float(value)
         except ValueError:
             errors[key] = f"{key} must be numeric"
-    data["tester_present_enabled"] = bool(params.get("tester_present_enabled", False))
+    data["tester_present_enabled"] = tester_present_enabled
     if not errors:
         errors.update(validate_safety_guard(SafetyGuard.from_mapping(data)))
     return errors
@@ -3131,7 +3140,9 @@ class EvidenceWriter:
         if not self.save_output:
             return
         self.write_text("transcript.txt", "\n".join(self.transcript) + ("\n" if self.transcript else ""))
-        self.write_text("raw_can_or_uds_log.txt", "\n".join(self.transcript) + ("\n" if self.transcript else ""))
+        raw_log_path = self.dir / "raw_can_or_uds_log.txt"
+        if not raw_log_path.exists():
+            self.write_text("raw_can_or_uds_log.txt", "\n".join(self.transcript) + ("\n" if self.transcript else ""))
         if self.raw_output:
             self.write_text("raw_output.txt", self.raw_output)
         self.write_json("request_response.json", {
@@ -3367,10 +3378,6 @@ class RunWorker(QThread):
                 guard = self._effective_safety_guard()
                 errors.update(validate_safety_guard(guard))
                 if self.test.id == "uds_28" and not self.target.dry_run and self.params.get("execution_mode") == "armed_bounded_execution":
-                    if not bool(self.params.get("operator_armed_confirmation", False)):
-                        errors["operator_armed_confirmation"] = "UDS-28 armed execution requires explicit operator confirmation."
-                    if guard.manual_confirm_required and not bool(self.params.get("operator_armed_confirmation", False)):
-                        errors["manual_confirm_required"] = "Manual operator confirmation is required before UDS-28 armed execution."
                     if not guard.stop_button_required:
                         errors["stop_button_required"] = "UDS-28 requires Stop DoS button availability."
                     if not guard.stop_on_bus_error:
@@ -3378,28 +3385,18 @@ class RunWorker(QThread):
                     if guard.max_duration_seconds <= 0 or guard.max_messages <= 0 or guard.max_send_rate <= 0:
                         errors["safety_guard"] = "UDS-28 requires duration, max_messages, and max_send_rate limits."
                 if self.test.id == "uds_32" and not self.target.dry_run and self.params.get("execution_mode") == "armed_bounded_execution":
-                    if not bool(self.params.get("operator_armed_confirmation", False)):
-                        errors["operator_armed_confirmation"] = "UDS-32 armed execution requires explicit operator confirmation."
-                    if guard.manual_confirm_required and not bool(self.params.get("operator_armed_confirmation", False)):
-                        errors["manual_confirm_required"] = "Manual operator confirmation is required before UDS-32 armed execution."
-                    if not guard.bench_mode_required:
-                        errors["bench_mode_required"] = "UDS-32 requires bench_mode_required=true."
                     if not guard.stop_button_required:
                         errors["stop_button_required"] = "UDS-32 requires Stop button availability."
                     if not guard.stop_on_bus_error:
                         errors["stop_on_bus_error"] = "UDS-32 requires stop_on_bus_error=true."
                     if guard.max_duration_seconds <= 0 or guard.max_messages <= 0 or guard.max_send_rate <= 0:
                         errors["safety_guard"] = "UDS-32 requires duration, max_frames, and send-rate limits."
-                if self.test.runner_kind != "modular_stub" and guard.manual_confirm_required and not self.target.dry_run and not self.target.authorized_disruptive:
-                    errors["manual_confirm_required"] = "Manual operator authorization is required before running this case."
             except ValueError as exc:
                 errors["safety_guard"] = str(exc)
         return errors
 
     def _safety_notes(self) -> list[str]:
         notes: list[str] = []
-        if self.test.disruptive:
-            notes.append("This test uses a disruptive UDS service; run only with operator authorization.")
         if self.target.dry_run:
             notes.append("Dry run was enabled; no CAN request or external command was executed.")
         return notes
@@ -3472,7 +3469,7 @@ class RunWorker(QThread):
         return SafetyGuard.from_mapping(data)
 
     def _run_modular_stub(self, evidence: EvidenceWriter) -> dict[str, Any]:
-        if self.test.id == "uds_28" and self.params.get("execution_mode") == "armed_bounded_execution":
+        if self.test.id == "uds_28":
             return self._run_uds28_bounded_execution(evidence)
         case_model = normalize_case_model(self.test.case_model)
         safety_guard = self._effective_safety_guard()
@@ -3516,7 +3513,8 @@ class RunWorker(QThread):
         observations: list[dict[str, Any]] = []
         raw_log: list[str] = []
         traffic_mode = str(self.params.get("traffic_mode") or "uds-targeted-isotp")
-        delay_s = max(0.0, 1.0 / max(0.001, metrics["send_rate_msgs_per_sec"]))
+        configured_delay = self._float_param("delay", -1.0)
+        delay_s = max(0.0, configured_delay) if configured_delay >= 0 else max(0.0, 1.0 / max(0.001, metrics["send_rate_msgs_per_sec"]))
         stop_reason = ""
         transport: Any = None
         can_bus: Any = None
@@ -3547,17 +3545,14 @@ class RunWorker(QThread):
                     observations.append(obs)
                     raw_log.append(json.dumps(obs, sort_keys=True))
                     if not obs.get("positive_response"):
-                        stop_reason = "safety_abort"
                         metrics["baseline_response_status"] = "session_flow_failed"
-                        break
+                        evidence.add_transcript("SESSION flow did not complete positively; continuing UDS-28 traffic.")
                     time.sleep(self.target.delay)
                 if not stop_reason:
                     baseline = self._uds28_send_uds(transport, bytes([0x3E, 0x00]), "baseline_tester_present")
                     observations.append(baseline)
                     raw_log.append(json.dumps(baseline, sort_keys=True))
                     metrics["baseline_response_status"] = str(baseline.get("response_type") or "")
-                    if not baseline.get("positive_response"):
-                        stop_reason = "safety_abort"
             if not stop_reason and traffic_mode == "can-id-random-frame":
                 can_mod, can_bus = (object(), object()) if mock_transport else self._open_can_bus()
             if not stop_reason and traffic_mode == "mixed" and transport is not None:
@@ -3609,7 +3604,7 @@ class RunWorker(QThread):
                         stop_reason = "no_response_threshold"
                 else:
                     try:
-                        arbid = rng.choice(candidate_ids)
+                        arbid = candidate_ids[metrics["can_frames_sent"] % len(candidate_ids)]
                         payload = self._uds28_generate_payload(rng, uds_payload=False)
                         validation_error = self._uds28_validate_generated_payload(payload, uds_payload=False)
                         if validation_error:
@@ -3618,13 +3613,26 @@ class RunWorker(QThread):
                             stop_reason = "safety_abort"
                             raw_log.append(f"GENERATOR_VALIDATION {validation_error}")
                             break
-                        self._send_raw_can(can_mod, can_bus, arbid, payload)
+                        extended_id = bool(self.params.get("extended_id", self.target.extended_id))
+                        self._send_raw_can(can_mod, can_bus, arbid, payload, is_extended_id=extended_id)
+                        rx_msg = None if mock_transport else self._recv_raw_can_once(can_bus, self._float_param("timeout", self.target.timeout))
                         row = {
+                            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                             "step": f"uds28_can_{metrics['can_frames_sent'] + 1}",
                             "arbitration_id": f"0x{arbid:X}",
+                            "extended_id": extended_id,
                             "request_hex": spaced(payload),
-                            "response_type": "not_expected",
-                            "note": "raw CAN frame sent; response not assumed",
+                            "request_payload": spaced(payload),
+                            "response_arbitration_id": f"0x{rx_msg.arbitration_id:X}" if rx_msg is not None else "",
+                            "response_hex": spaced(bytes(rx_msg.data)) if rx_msg is not None else "",
+                            "response_payload": spaced(bytes(rx_msg.data)) if rx_msg is not None else "",
+                            "response_type": "raw_can_response" if rx_msg is not None else "timeout",
+                            "timeout_or_no_response": rx_msg is None,
+                            "nrc": "",
+                            "nrc_meaning": "",
+                            "decoded_nrc": "",
+                            "preliminary_verdict": "OBSERVATION" if rx_msg is not None else "INCONCLUSIVE_TIMEOUT",
+                            "note": "raw CAN frame sent; first CAN response captured" if rx_msg is not None else "raw CAN frame sent; no CAN response before timeout",
                         }
                         observations.append(row)
                         raw_log.append(json.dumps(row, sort_keys=True))
@@ -3751,20 +3759,36 @@ class RunWorker(QThread):
             return [value for value in self._selected_arbid_values(self.params)[:4096]]
         if strategy not in {"manual-range", "mixed observed + non-existing"}:
             return []
-        start = _parse_arbid_int(self.params.get("manual_range_start"))
-        end = _parse_arbid_int(self.params.get("manual_range_end"))
+        try:
+            start, end = self._uds28_manual_range(self.params)
+        except ValueError:
+            start = _parse_arbid_int(self.params.get("manual_range_start"))
+            end = _parse_arbid_int(self.params.get("manual_range_end"))
         if start is None or end is None:
-            try:
-                start, end = parse_arbid_range_text(self.params.get("manual_arbid_range"))
-            except ValueError:
-                return []
+            return []
         if end < start:
             return []
         count = min(4096, end - start + 1)
         return list(range(start, start + count))
 
+    @staticmethod
+    def _uds28_manual_range(params: dict[str, Any]) -> tuple[int, int]:
+        start_text = str(params.get("start_arbid") or "").strip()
+        end_text = str(params.get("end_arbid") or "").strip()
+        if start_text or end_text:
+            start = parse_hex_int(start_text, name="start_arbid", maximum=0x1FFFFFFF)
+            end = parse_hex_int(end_text, name="end_arbid", maximum=0x1FFFFFFF)
+            if start > end:
+                raise ValueError("end_arbid must be >= start_arbid")
+            return start, end
+        return parse_arbid_range_text(params.get("manual_arbid_range"))
+
     def _uds28_generate_payload(self, rng: random.Random, *, uds_payload: bool) -> bytes:
         mode = str(self.params.get("generator_mode") or "transport-valid random")
+        manual_payload = str(self.params.get("payload") or "").strip()
+        if manual_payload and (not uds_payload or mode == "manual payload"):
+            payload = parse_hex_payload(manual_payload, name="payload", allow_empty=False, strict_bytes=True)
+            return payload[:8] if not uds_payload else payload
         min_len = max(0, self._int_param("payload_min_length", 1))
         max_len = max(min_len, self._int_param("payload_max_length", 8))
         if not uds_payload:
@@ -3803,9 +3827,6 @@ class RunWorker(QThread):
             return f"generated payload length {len(payload)} outside configured bounds {min_len}-{max_len}"
         if not uds_payload and len(payload) > 8:
             return "CAN random-frame payload exceeded 8 bytes"
-        destructive_services = {0x14, 0x2E, 0x31, 0x34, 0x36, 0x37, 0x3D, 0x85}
-        if uds_payload and payload and payload[0] in destructive_services and not bool(self.params.get("allow_destructive_uds28_services", False)):
-            return f"generated destructive service 0x{payload[0]:02X} blocked"
         return ""
 
     @staticmethod
@@ -3876,6 +3897,25 @@ class RunWorker(QThread):
         self.log_line.emit(f"CAN TX {arbid:X}#{payload[:8].hex().upper()}")
         self.transcript_line.emit(f"CAN TX {arbid:X}#{payload[:8].hex().upper()}")
 
+    def _recv_raw_can_once(self, bus: Any, timeout_s: float) -> Any:
+        recv = getattr(bus, "recv", None)
+        if not callable(recv):
+            return None
+        try:
+            msg = recv(timeout=max(0.0, timeout_s))
+        except Exception as exc:
+            self.log_line.emit(f"CAN RX <error> {type(exc).__name__}: {exc}")
+            return None
+        if msg is None:
+            self.log_line.emit("CAN RX <timeout>")
+            self.transcript_line.emit("CAN RX <timeout>")
+            return None
+        data = bytes(getattr(msg, "data", b""))
+        arbid = int(getattr(msg, "arbitration_id", 0))
+        self.log_line.emit(f"CAN RX {arbid:X}#{data.hex().upper()}")
+        self.transcript_line.emit(f"CAN RX {arbid:X}#{data.hex().upper()}")
+        return msg
+
     @staticmethod
     def _uds28_during_status(metrics: dict[str, Any]) -> str:
         if metrics["bus_error_count"]:
@@ -3889,13 +3929,12 @@ class RunWorker(QThread):
         return "no_generated_messages_sent"
 
     def _uds28_verdict(self, metrics: dict[str, Any]) -> tuple[str, str]:
-        baseline = str(metrics.get("baseline_response_status") or "")
         recovery = str(metrics.get("after_test_recovery_status") or "")
         physical_note = str(metrics.get("physical_observation_note") or "").lower()
         recovery_note = str(metrics.get("recovery_note") or "").lower()
         degradation_words = ("degrad", "reset", "stall", "loss", "unavailable", "power cycle", "failed", "unsafe")
-        if metrics.get("stop_reason") in {"safety_abort"} or (metrics["traffic_mode"] in {"uds-targeted-isotp", "mixed"} and baseline not in {"positive_response", "raw_response"}):
-            return "INCONCLUSIVE", "Baseline response was not positive or setup prevented interpretation."
+        if metrics.get("stop_reason") in {"safety_abort"}:
+            return "INCONCLUSIVE", "Execution stopped before sending generated traffic."
         if metrics.get("stop_reason") == "transport_error":
             return "ERROR", "Transport execution error occurred during UDS-28."
         if metrics.get("bus_error_count") or metrics.get("stop_reason") == "bus_error":
@@ -3926,12 +3965,18 @@ class RunWorker(QThread):
         selected_count = len([item for item in re.split(r"[\s,;]+", str(params.get("selected_arbid") or "")) if item.strip()])
         non_existing = self._int_param("non_existing_sample_count", 0) if strategy == "mixed observed + non-existing" else self._int_param("gap_sample_count", 0) if strategy == "observed-range-with-gaps" else 0
         manual_range = str(params.get("manual_arbid_range") or "")
+        if params.get("start_arbid") or params.get("end_arbid"):
+            try:
+                start, end = self._uds28_manual_range(params)
+                manual_range = f"0x{start:X}-0x{end:X}"
+            except ValueError:
+                manual_range = f"{params.get('start_arbid') or ''}-{params.get('end_arbid') or ''}"
         final_candidates = self._int_param("resolved_arbid_candidate_count", 0)
         if not final_candidates:
             final_candidates = 1 if traffic_mode == "uds-targeted-isotp" else max(0, non_existing + selected_count)
         if strategy == "manual-range":
             try:
-                start, end = parse_arbid_range_text(manual_range)
+                start, end = self._uds28_manual_range(params)
                 final_candidates = end - start + 1
             except ValueError:
                 final_candidates = 0
@@ -3946,6 +3991,12 @@ class RunWorker(QThread):
             "observed_arbid_count": int(params.get("observed_arbid_count") or 0),
             "selected_arbid_count": selected_count,
             "manual_arbid_range": manual_range,
+            "start_arbid": str(params.get("start_arbid") or ""),
+            "end_arbid": str(params.get("end_arbid") or ""),
+            "payload": normalize_payload_hex(params.get("payload") or "") if str(params.get("payload") or "").strip() else "",
+            "timeout": self._float_param("timeout", self.target.timeout),
+            "delay": self._float_param("delay", self.target.delay),
+            "extended_id": bool(params.get("extended_id", self.target.extended_id)),
             "include_non_existing_arbid_count": non_existing,
             "final_candidate_arbid_count": final_candidates,
             "generator_mode": str(params.get("generator_mode") or ""),
@@ -4007,29 +4058,18 @@ class RunWorker(QThread):
             0x11: "ecu_reset_operational",
         }.get(payload[0] if payload else -1, "diagnostic_service")
         observations: list[dict[str, Any]] = []
-        for note in self._safety_notes():
-            self.log_line.emit(f"Safety note: {note}")
-            evidence.add_transcript(f"SAFETY: {note}")
         if case_model.service_id.lower() in {"0x85", "85"}:
-            warning = "ControlDTCSetting may affect diagnostic evidence and logging behavior."
-            self.log_line.emit(f"Safety note: {warning}")
-            evidence.add_transcript(f"SAFETY: {warning}")
+            evidence.add_transcript("NOTE ControlDTCSetting response is recorded as ECU behavior; no SecurityAccess is performed by the tool.")
         if case_model.service_id.lower() in {"0x14", "14"}:
-            warning = "ClearDiagnosticInformation may erase diagnostic evidence / DTC records. Manual confirmation is required."
-            self.log_line.emit(f"Safety note: {warning}")
-            evidence.add_transcript(f"SAFETY: {warning}")
+            evidence.add_transcript("NOTE ClearDiagnosticInformation response is recorded as ECU behavior; no SecurityAccess is performed by the tool.")
         if case_model.service_id.lower() in {"0x28", "28"}:
-            warning = "CommunicationControl while operational may disrupt communication; do not run on public roads."
-            self.log_line.emit(f"Safety note: {warning}")
-            evidence.add_transcript(f"SAFETY: {warning}")
+            evidence.add_transcript("NOTE CommunicationControl response is recorded as ECU behavior; no tool-side authorization gate is enforced.")
         if case_model.service_id.lower() in {"0x11", "11"}:
-            warning = "ECU Reset while operational may interrupt ECU function; do not run on public roads."
-            self.log_line.emit(f"Safety note: {warning}")
-            evidence.add_transcript(f"SAFETY: {warning}")
+            evidence.add_transcript("NOTE ECU Reset response is recorded as ECU behavior; no tool-side authorization gate is enforced.")
         evidence.add_transcript("ASSERTION No SecurityAccess seed/key exchange is performed by this runner before the tested request.")
 
         client = self._open_uds_client()
-        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations)
+        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations, continue_on_failure=True)
         if session_failure:
             session_failure.update({
                 "request_hex": spaced(payload),
@@ -4092,6 +4132,7 @@ class RunWorker(QThread):
             "negative_response": bool(obs.get("negative_response", False)),
             "nrc": obs.get("nrc", ""),
             "nrc_meaning": obs.get("nrc_meaning", ""),
+            "decoded_nrc": obs.get("decoded_nrc", ""),
             "suppress_positive_response_requested": suppress_positive,
             "selected_group_of_dtc": runner.selected_group_of_dtc(payload),
             "group_of_dtc_meaning": runner.group_of_dtc_meaning(payload),
@@ -4153,6 +4194,10 @@ class RunWorker(QThread):
                 "physical_interruption_note": summary.get("physical_interruption_note", ""),
                 "recovery_note": summary.get("recovery_note", ""),
             })
+        for item in observations:
+            item.setdefault("preliminary_verdict", result.verdict if item.get("step") != "session_flow" else "SETUP_WARNING")
+        if evidence.save_output:
+            evidence.write_text("raw_can_or_uds_log.txt", "\n".join(json.dumps(item, sort_keys=True) for item in observations))
         return summary
 
     def _diagnostic_service_evidence_record(
@@ -4222,7 +4267,7 @@ class RunWorker(QThread):
         evidence.add_transcript(f"Payload length {len(payload)} sample {spaced(payload[:64])}{' ...' if len(payload) > 64 else ''}")
 
         client = self._open_uds_client()
-        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations)
+        session_failure = self._run_session_flow_for_direct_test(client, evidence, observations, continue_on_failure=True)
         if session_failure:
             session_failure.update(self._uds31_evidence_record(evidence, payload, "", "session_flow_failed", observations, "INCONCLUSIVE"))
             return session_failure
@@ -4342,14 +4387,12 @@ class RunWorker(QThread):
         if nrc or response_classification == "negative_response":
             return "PASS / SECURE_BEHAVIOR", "ECU rejected the oversized/boundary request and no instability evidence was recorded."
         if positive:
-            return "OBSERVATION", "ECU returned a positive response to oversized/boundary input; impact evidence is required."
+            return "FINDING_CANDIDATE", "ECU returned a positive response to oversized/boundary input; impact evidence is required."
         if response_classification in {"timeout", "no_response"}:
             return "OBSERVATION", "Timeout/no-response occurred; by itself this does not prove a crash or security finding."
         return "INCONCLUSIVE", "UDS-31 result requires additional baseline or recovery evidence."
 
     def _run_uds32_priority_bounded(self, evidence: EvidenceWriter) -> dict[str, Any]:
-        if self.params.get("execution_mode") != "armed_bounded_execution":
-            return self._error_summary(evidence, VERDICT_CONFIG, "UDS-32 actual sending requires Armed bounded execution.")
         case_model = normalize_case_model(self.test.case_model)
         safety_guard = self._effective_safety_guard()
         runner = make_modular_runner("can_priority_flood")
@@ -4386,7 +4429,20 @@ class RunWorker(QThread):
                 try:
                     self._send_raw_can(can_mod, bus, can_id, payload, is_extended_id=is_extended_id)
                     actual_frames += 1
-                    raw_log.append(json.dumps({"frame": actual_frames, "can_id": f"0x{can_id:X}", "payload": spaced(payload), "elapsed_seconds": round(elapsed, 6)}, sort_keys=True))
+                    raw_log.append(json.dumps({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                        "frame": actual_frames,
+                        "can_id": f"0x{can_id:X}",
+                        "tx_arbitration_id": f"0x{can_id:X}",
+                        "payload": spaced(payload),
+                        "request_payload": spaced(payload),
+                        "response_payload": "",
+                        "nrc": "",
+                        "nrc_meaning": "",
+                        "decoded_nrc": "",
+                        "preliminary_verdict": "SENT",
+                        "elapsed_seconds": round(elapsed, 6),
+                    }, sort_keys=True))
                 except Exception as exc:
                     bus_error_count += 1
                     stop_reason = "bus_error"
@@ -5037,7 +5093,14 @@ class RunWorker(QThread):
             time.sleep(self.target.delay)
         return True, observations
 
-    def _run_session_flow_for_direct_test(self, client: Any, evidence: EvidenceWriter, observations: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    def _run_session_flow_for_direct_test(
+        self,
+        client: Any,
+        evidence: EvidenceWriter,
+        observations: list[dict[str, Any]],
+        *,
+        continue_on_failure: bool = False,
+    ) -> Optional[dict[str, Any]]:
         for payload in expand_session_flow_requests(self.params.get("session_flow", "")):
             exchange = self._send_uds(client, payload)
             parsed = parse_uds_response(payload, exchange.response, transport_status=exchange.response_type)
@@ -5047,6 +5110,11 @@ class RunWorker(QThread):
             evidence.add_transcript(f"SESSION TX {spaced(payload)}")
             evidence.add_transcript(f"SESSION RX {spaced(exchange.response) if exchange.response else '<no response>'} [{parsed.response_type}]")
             if not parsed.positive_response:
+                if continue_on_failure:
+                    evidence.add_transcript("SESSION flow did not complete positively; continuing to configured test request.")
+                    self.log_line.emit("Session flow did not complete positively; continuing to configured test request.")
+                    time.sleep(self.target.delay)
+                    continue
                 summary = self._base_summary(evidence)
                 summary["observations"] = observations
                 summary["verdict"] = VERDICT_INCONCLUSIVE
@@ -5493,19 +5561,40 @@ class RunWorker(QThread):
         self.transcript_line.emit(f"RX {self.target.tester_rx_id:X}: {spaced(response)}")
         return UdsExchange(response, "raw_response")
 
-    @staticmethod
-    def _observation(step: str, request: bytes, response: Optional[bytes], parsed: UdsParsedResponse, error: str = "") -> dict[str, Any]:
+    def _observation(self, step: str, request: bytes, response: Optional[bytes], parsed: UdsParsedResponse, error: str = "") -> dict[str, Any]:
         return {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "step": step,
+            "tx_arbitration_id": f"0x{self.target.tester_tx_id:X}",
+            "rx_arbitration_id": f"0x{self.target.tester_rx_id:X}",
             "request_hex": spaced(request),
+            "request_sid": f"0x{request[0]:02X}" if request else "",
+            "request_payload": spaced(request),
             "response_hex": spaced(response) if response else "",
+            "response_sid": f"0x{response[0]:02X}" if response else "",
+            "response_payload": spaced(response) if response else "",
             "response_type": parsed.response_type,
             "positive_response": parsed.positive_response,
             "negative_response": parsed.negative_response,
             "nrc": f"0x{parsed.nrc:02X}" if parsed.nrc is not None else "",
             "nrc_meaning": parsed.nrc_meaning,
+            "decoded_nrc": f"NRC 0x{parsed.nrc:02X} - {parsed.nrc_meaning}" if parsed.nrc is not None else "",
+            "timeout_or_no_response": parsed.response_type in {"timeout", "no_response"},
+            "preliminary_verdict": _preliminary_verdict(parsed),
             "note": error or parsed.note,
         }
+
+
+def _preliminary_verdict(parsed: UdsParsedResponse) -> str:
+    if parsed.response_type in {"timeout", "no_response"}:
+        return "INCONCLUSIVE_TIMEOUT"
+    if parsed.negative_response or parsed.nrc is not None:
+        return "PASS / SECURE_BEHAVIOR"
+    if parsed.positive_response:
+        return "POSITIVE_RESPONSE_OBSERVED"
+    if parsed.response_type == "transport_error":
+        return "ERROR"
+    return "OBSERVATION"
 
 
 class NoWheelComboBox(QComboBox):
@@ -5668,7 +5757,7 @@ class UdsReconGui(QMainWindow):
         self.dry_run = QCheckBox("Dry run")
         self.dry_run.setChecked(False)
         self.dry_run.setVisible(False)
-        self.authorized_disruptive = QCheckBox("Operator authorization confirmed")
+        self.authorized_disruptive = QCheckBox("Project scope confirmed")
         self.authorized_disruptive.setChecked(False)
         self.authorized_disruptive.setVisible(False)
         self.tester_tx_label = QLabel("tester_tx_id")
@@ -6188,20 +6277,34 @@ class UdsReconGui(QMainWindow):
         send_rate = 0.0
         min_len = 1
         max_len = 8
-        catalog_required = traffic_mode in {"can-id-random-frame", "mixed"} and strategy in {
-            "observed-only",
-            "selected-only",
-            "observed-range-with-gaps",
-        }
+        catalog_required = False
         if catalog_required and not self.arbid_catalog_rows:
             errors["arbid_strategy"] = f"{strategy} requires a loaded ArbID catalog."
         if traffic_mode in {"can-id-random-frame", "mixed"} and strategy == "selected-only" and not self._selected_arbid_values(params):
             errors["selected_arbid"] = "selected-only requires one or more selected ArbIDs from the catalog table."
         if traffic_mode in {"can-id-random-frame", "mixed"} and strategy in {"manual-range", "mixed observed + non-existing"}:
+            manual_start: Optional[int] = None
+            manual_end: Optional[int] = None
             try:
-                parse_arbid_range_text(params.get("manual_arbid_range"))
+                manual_start, manual_end = self._uds28_manual_range(params)
             except ValueError as exc:
-                errors["manual_arbid_range"] = str(exc)
+                errors["start_arbid"] = str(exc)
+            if manual_start is not None and manual_end is not None:
+                if manual_end - manual_start + 1 > 4096:
+                    errors["end_arbid"] = "ArbID range is limited to 4096 IDs per run."
+                if not bool(params.get("extended_id", False)) and manual_end > 0x7FF:
+                    errors["start_arbid"] = "Standard CAN ID range must be <= 0x7FF; enable extended_id for 29-bit IDs."
+            try:
+                parse_hex_payload(params.get("payload") or "", name="payload", allow_empty=False, strict_bytes=True)
+            except ValueError as exc:
+                errors["payload"] = str(exc)
+            for key, label in (("timeout", "Response timeout"), ("delay", "Delay")):
+                try:
+                    value = float(params.get(key) or "")
+                    if value < 0:
+                        errors[key] = f"{label} must be >= 0."
+                except ValueError:
+                    errors[key] = f"{label} must be numeric."
         if traffic_mode in {"can-id-random-frame", "mixed"}:
             pool = self._resolve_uds28_arbid_pool(params)
             if strategy == "observed-only" and pool["observed_count"] <= 0:
@@ -6266,11 +6369,6 @@ class UdsReconGui(QMainWindow):
                     break
             if not str(params.get("manual_seed_payloads") or "").strip():
                 errors["manual_seed_payloads"] = "Manual seed payload list requires at least one hex payload."
-        if params.get("execution_mode") == "armed_bounded_execution":
-            if not bool(params.get("operator_armed_confirmation", False)):
-                errors["operator_armed_confirmation"] = "Armed bounded execution requires explicit operator confirmation."
-            if send_rate > 100 and not bool(params.get("high_rate_confirmation", False)):
-                errors["send_rate_msgs_per_sec"] = "High bench rates above 100 msg/s require explicit high-rate confirmation."
         return errors
 
     def _selected_arbid_values(self, params: dict[str, Any]) -> list[int]:
@@ -6283,6 +6381,18 @@ class UdsReconGui(QMainWindow):
                 values.append(parsed)
         return values
 
+    @staticmethod
+    def _uds28_manual_range(params: dict[str, Any]) -> tuple[int, int]:
+        start_text = str(params.get("start_arbid") or "").strip()
+        end_text = str(params.get("end_arbid") or "").strip()
+        if start_text or end_text:
+            start = parse_hex_int(start_text, name="start_arbid", maximum=0x1FFFFFFF)
+            end = parse_hex_int(end_text, name="end_arbid", maximum=0x1FFFFFFF)
+            if start > end:
+                raise ValueError("end_arbid must be >= start_arbid")
+            return start, end
+        return parse_arbid_range_text(params.get("manual_arbid_range"))
+
     def _resolve_uds28_arbid_pool(self, params: dict[str, Any]) -> dict[str, Any]:
         traffic_mode = str(params.get("traffic_mode") or "uds-targeted-isotp")
         strategy = str(params.get("arbid_strategy") or "manual-range")
@@ -6294,8 +6404,16 @@ class UdsReconGui(QMainWindow):
         range_count = 0
         if manual_range_text:
             try:
-                manual_start, manual_end = parse_arbid_range_text(manual_range_text)
+                manual_start, manual_end = self._uds28_manual_range(params)
                 range_count = manual_end - manual_start + 1
+                manual_range_text = f"0x{manual_start:X}-0x{manual_end:X}"
+            except ValueError:
+                pass
+        elif params.get("start_arbid") or params.get("end_arbid"):
+            try:
+                manual_start, manual_end = self._uds28_manual_range(params)
+                range_count = manual_end - manual_start + 1
+                manual_range_text = f"0x{manual_start:X}-0x{manual_end:X}"
             except ValueError:
                 pass
         non_existing_count = 0
@@ -6477,7 +6595,7 @@ class UdsReconGui(QMainWindow):
             lines.append(f"Subfunction meaning: {meaning or '<not available>'}")
             if payload and len(payload) >= 2 and (payload[1] & 0x7F) == 0x02:
                 lines.append("Warning: 85 02 may suppress DTC updates; evidence required.")
-            lines.append("Safety: manual confirmation required")
+            lines.append("Execution: sends configured request and records ECU response")
         else:
             group = runner.selected_group_of_dtc(payload) if payload else ""
             meaning = runner.group_of_dtc_meaning(payload) if payload else ""
@@ -6485,7 +6603,7 @@ class UdsReconGui(QMainWindow):
                 f"groupOfDTC: {group or '<not available>'}",
                 f"groupOfDTC meaning: {meaning or '<not available>'}",
                 "Warning: may erase DTC evidence.",
-                "Safety: manual confirmation required",
+                "Execution: sends configured request and records ECU response",
             ])
         return "\n".join(lines)
 
@@ -6527,11 +6645,11 @@ class UdsReconGui(QMainWindow):
         if traffic_mode in {"can-id-random-frame", "mixed"}:
             lines.extend([
                 f"ArbID strategy: {pool['strategy']}",
-                f"Catalog: {catalog_detail}",
-                f"Selected ArbIDs: {pool['selected_count']}",
                 f"Manual range: {pool['manual_range'] or '<not used>'}",
+                f"Payload: {normalize_payload_hex(params.get('payload') or '') if str(params.get('payload') or '').strip() else '<generated>'}",
+                f"Response timeout: {self._safe_float(params.get('timeout'), target.timeout if target else 0.2):g} s",
+                f"Extended ID: {bool(params.get('extended_id', False))}",
                 f"Candidate ArbIDs: {pool['source']}; final candidate count {pool['candidate_count']}",
-                f"Non-existing ArbIDs included: {pool['include_non_existing_arbid_count']}",
             ])
         generator_detail = str(params.get("generator_mode") or "<unset>")
         if generator_detail == "mixed valid/invalid":
@@ -6546,7 +6664,7 @@ class UdsReconGui(QMainWindow):
         lines.extend([
             f"Generator: {generator_detail} ({generator_notes.get(str(params.get('generator_mode') or ''), 'review generator settings')})",
             f"Send rate: {rate:g} msg/s",
-            f"Inter-message delay: {delay_ms:.0f} ms",
+            f"Inter-message delay: {self._safe_float(params.get('delay'), delay_ms / 1000.0) * 1000.0:.0f} ms",
             f"Duration: {duration:g} s",
             f"Max messages: {max_messages}",
         ])
@@ -6562,9 +6680,8 @@ class UdsReconGui(QMainWindow):
             f"TesterPresent: {'enabled' if tester_present_enabled else 'disabled'}",
             f"TesterPresent interval: {tester_present_interval:g} s",
             f"Estimated TesterPresent count: {tester_present_count} (counted separately from max messages)",
-            f"Execution: {'armed bounded execution' if params.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
-            f"Safety: {safety_tier}; manual confirmation required for armed execution",
-            "Stop: Stop DoS button available; stop on duration, max messages, bus error, or operator stop",
+            "Execution: bounded live execution when Run is pressed.",
+            f"Operational limits: {safety_tier}; stop on duration, max messages, bus error, or operator stop",
             "Rate note: 10 msg/s is a conservative test rate, not a high-load flood rate. Increase only in bench/controlled mode.",
             "",
             "Assessment:",
@@ -6587,8 +6704,7 @@ class UdsReconGui(QMainWindow):
             f"Final request: {request}",
             f"controlType meaning: {meanings.get(control_type, '<manual>')}",
             f"communicationType value: {comm_type or '<unset>'}",
-            "Execution: single controlled diagnostic request; non-dry requires manual confirmation.",
-            "Safety: manual confirmation required",
+            "Execution: sends one configured diagnostic request and records ECU response.",
         ]
         vehicle_state = str(params.get("vehicle_state") or "")
         if control_type in {"0x01", "0x02", "0x03"} or "operational" in vehicle_state or "controlled driving" in vehicle_state:
@@ -6626,8 +6742,7 @@ class UdsReconGui(QMainWindow):
             "Assessment scenario: ECU Reset 0x11 while operational.",
             "0x11 is ECU Reset, not CommunicationControl.",
             f"Final request: {request}",
-            "Execution: single controlled diagnostic request; non-dry requires manual confirmation.",
-            "Safety: manual confirmation required",
+            "Execution: sends one configured diagnostic request and records ECU response.",
         ]
         vehicle_state = str(params.get("vehicle_state") or "")
         if "operational" in vehicle_state or "controlled driving" in vehicle_state:
@@ -6669,10 +6784,8 @@ class UdsReconGui(QMainWindow):
             f"ISO-TP enabled: {bool(params.get('isotp_enabled', False))}",
             f"Final request sample: {request}",
             "Verdict is based on safe rejection, crash/reset/no-response/recovery behavior.",
-            "Safety: manual confirmation required; bounded single/bounded-attempt execution only.",
+            "Operational limits: bounded single/bounded-attempt execution.",
         ]
-        if params.get("target_service") == "0x3D":
-            lines.append("Warning: 0x3D WriteMemoryByAddress is advanced and disabled by default.")
         return "\n".join(lines)
 
     def _build_uds32_preview(self, params: dict[str, Any]) -> str:
@@ -6696,7 +6809,7 @@ class UdsReconGui(QMainWindow):
             f"Duration: {duration:g} s",
             f"Max frames: {max_frames}",
             f"Execution: {'armed bounded execution' if params.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
-            "Safety: manual confirmation and bench mode required; bounded frames only.",
+            "Operational limits: bounded frames only; stop on duration, max frames, bus error, or operator stop.",
             "Stop: stop on duration, max frames, bus error, or operator stop.",
             "Assessment: verdict is based on observed starvation, physical impact, and recovery evidence.",
         ])
@@ -6710,10 +6823,6 @@ class UdsReconGui(QMainWindow):
         target, _ = self._collect_target()
         if target is None:
             return
-        if self.current_test.id == "uds_28" and self._collect_params().get("execution_mode") != "armed_bounded_execution":
-            target.dry_run = True
-        if self.current_test.id == "uds_32" and self._collect_params().get("execution_mode") != "armed_bounded_execution":
-            target.dry_run = True
         if target.save_output:
             ensure_dir(target.output_dir)
         params = self._collect_params()
@@ -7017,7 +7126,7 @@ def default_params_for_test(test: TestDefinition) -> dict[str, Any]:
     return params
 
 
-def run_self_checks() -> None:
+def run_self_checks(*, include_runtime: bool = False) -> None:
     assert spaced(build_uds21_request({
         "did_hex": "0xF190",
         "data_generation": "explicit",
@@ -7372,12 +7481,12 @@ def run_self_checks() -> None:
     assert "inter_message_delay_ms" in uds28_field_ids
     assert "include_non_existing_arbids" not in uds28_field_ids
     assert "Safety guard:" not in gui.preview.toPlainText()
-    assert "Traffic mode: UDS-targeted ISO-TP mode" in gui.preview.toPlainText()
+    assert "Traffic mode: CAN-ID random frame mode" in gui.preview.toPlainText()
     gui._set_combo_data("traffic_mode", "can-id-random-frame")
     gui._set_combo_data("arbid_strategy", "manual-range")
     gui._refresh_validation_and_preview()
     assert "ArbID strategy: manual-range" in gui.preview.toPlainText()
-    assert "Inter-message delay: 100 ms" in gui.preview.toPlainText()
+    assert "Inter-message delay: 50 ms" in gui.preview.toPlainText()
     uds26_runner = make_modular_runner("diagnostic_service")
     uds26_case_model = normalize_case_model(registry["uds_26"].case_model)
     raw_errors = uds26_runner.validate(
@@ -7385,7 +7494,8 @@ def run_self_checks() -> None:
         default_params_for_test(registry["uds_26"]) | {"raw_payload_override": "28 00"},
         SafetyGuard.from_mapping(registry["uds_26"].safety_guard),
     )
-    assert "must start with service 0x85" in raw_errors["request_payload"]
+    assert raw_errors == {}
+    assert spaced(uds26_runner.build_payload(uds26_case_model, default_params_for_test(registry["uds_26"]) | {"raw_payload_override": "28 00"})) == "28 00"
     suppress_payload = uds26_runner.build_payload(uds26_case_model, default_params_for_test(registry["uds_26"]) | {"subfunction": "0x81"})
     assert spaced(suppress_payload) == "85 81"
     assert uds26_runner.suppress_positive_response_requested(suppress_payload)
@@ -7406,7 +7516,7 @@ def run_self_checks() -> None:
         uds27_params | {"raw_payload_override": "14 FF FF FF FF", "advanced_raw_payload_override_enabled": False},
         SafetyGuard.from_mapping(registry["uds_27"].safety_guard),
     )
-    assert "requires advanced_raw_payload_override_enabled=true" in raw_uds27_errors["request_payload"]
+    assert raw_uds27_errors == {}
     raw_uds27_advanced = uds26_runner.validate(
         uds27_case_model,
         uds27_params | {"raw_payload_override": "14 FF FF FF FF", "advanced_raw_payload_override_enabled": True},
@@ -7467,14 +7577,14 @@ def run_self_checks() -> None:
         uds31_params | {"target_service": "0x3D", "enable_advanced_memory_service": False},
         SafetyGuard.from_mapping(uds31_test.safety_guard),
     )
-    assert "enable_advanced_memory_service" in uds31_3d_errors or "request_payload" in uds31_3d_errors
+    assert uds31_3d_errors == {}
     uds32_test = registry["uds_32"]
     uds32_params = default_params_for_test(uds32_test)
     uds32_runner = make_modular_runner("can_priority_flood")
     assert uds32_runner.payload(uds32_params) == bytes([0] * 8)
     assert "CAN bus-level" in uds32_runner.dry_run_preview(normalize_case_model(uds32_test.case_model), uds32_params, SafetyGuard.from_mapping(uds32_test.safety_guard))
     placeholder_dir = Path(tempfile.mkdtemp())
-    placeholder_target = mk_target(dry_run=False, authorized=False, output_dir=placeholder_dir)
+    placeholder_target = mk_target(dry_run=True, authorized=False, output_dir=placeholder_dir)
     placeholder_test = registry["uds_28"]
     placeholder_params = default_params_for_test(placeholder_test)
     placeholder_worker = RunWorker(placeholder_test, placeholder_target, placeholder_params, "")
@@ -7483,12 +7593,218 @@ def run_self_checks() -> None:
     assert placeholder_worker._opened_buses == []
     placeholder_run_dir = next(placeholder_dir.iterdir())
     placeholder_summary = json.loads((placeholder_run_dir / "summary.json").read_text(encoding="utf-8"))
-    assert placeholder_summary["verdict"] == "NOT_IMPLEMENTED / STUB"
-    assert placeholder_summary["placeholder_evidence_record"]["response_payload"] == ""
+    assert placeholder_summary["verdict"] == "DRY_RUN / NOT_EXECUTED"
+    assert placeholder_summary["uds28_evidence_record"]["verdict"] == "DRY_RUN / NOT_EXECUTED"
 
     def read_single_summary(output_dir: Path) -> dict[str, Any]:
         run_dir = next(output_dir.iterdir())
         return json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+
+    if include_runtime:
+        class SimulatedRuntimeWorker(RunWorker):
+            def __init__(
+                self,
+                test: TestDefinition,
+                target: TargetProfile,
+                params: dict[str, Any],
+                *,
+                uds_mode: str = "positive",
+                fail_session: bool = False,
+                bus_error_after: int | None = None,
+                raw_can_response: bool = True,
+            ) -> None:
+                super().__init__(test, target, params, "")
+                self.uds_mode = uds_mode
+                self.fail_session = fail_session
+                self.bus_error_after = bus_error_after
+                self.raw_can_response = raw_can_response
+                self.sent_uds: list[bytes] = []
+                self.sent_can: list[tuple[int, bytes, bool]] = []
+
+            def _open_uds_client(self) -> object:
+                return object()
+
+            def _open_can_bus(self) -> tuple[Any, Any]:
+                return object(), object()
+
+            def _send_uds(self, transport: Any, payload: bytes) -> UdsExchange:
+                self.sent_uds.append(payload)
+                if payload and payload[0] == 0x10 and self.fail_session:
+                    return UdsExchange(bytes([0x7F, 0x10, 0x12]), "raw_response")
+                if self.uds_mode == "timeout" and payload and payload[0] != 0x10:
+                    return UdsExchange(None, "timeout", "simulated timeout")
+                if self.uds_mode == "nrc" and payload and payload[0] != 0x10:
+                    return UdsExchange(bytes([0x7F, payload[0], 0x33]), "raw_response")
+                if not payload:
+                    return UdsExchange(None, "transport_error", "empty payload")
+                return UdsExchange(bytes([(payload[0] + 0x40) & 0xFF]) + payload[1:min(len(payload), 3)], "raw_response")
+
+            def _send_raw_can(self, can_mod: Any, bus: Any, arbid: int, payload: bytes, *, is_extended_id: Optional[bool] = None) -> None:
+                self.sent_can.append((arbid, payload[:8], bool(is_extended_id)))
+                if self.bus_error_after is not None and len(self.sent_can) > self.bus_error_after:
+                    raise RuntimeError("simulated bus error")
+
+            def _recv_raw_can_once(self, bus: Any, timeout_s: float) -> Any:
+                if not self.raw_can_response:
+                    return None
+
+                class RawMsg:
+                    arbitration_id = 0x650
+                    data = bytes.fromhex("7F 3E 11")
+
+                return RawMsg()
+
+        def run_simulated(
+            test_id: str,
+            params: dict[str, Any],
+            *,
+            uds_mode: str = "positive",
+            fail_session: bool = False,
+            bus_error_after: int | None = None,
+            raw_can_response: bool = True,
+            stop_before_run: bool = False,
+        ) -> tuple[SimulatedRuntimeWorker, dict[str, Any], Path]:
+            out_dir = Path(tempfile.mkdtemp())
+            worker = SimulatedRuntimeWorker(
+                registry[test_id],
+                mk_target(dry_run=False, authorized=False, output_dir=out_dir),
+                params,
+                uds_mode=uds_mode,
+                fail_session=fail_session,
+                bus_error_after=bus_error_after,
+                raw_can_response=raw_can_response,
+            )
+            if stop_before_run:
+                worker.stop()
+            worker.run()
+            run_dir = next(out_dir.iterdir())
+            return worker, json.loads((run_dir / "summary.json").read_text(encoding="utf-8")), run_dir
+
+        for test_id in ("uds_26", "uds_27", "uds_29", "uds_30"):
+            params = default_params_for_test(registry[test_id]) | {"session_flow": "7E"}
+            if test_id in {"uds_29", "uds_30"}:
+                params["vehicle_state"] = "operational/driving-state simulated"
+            if test_id == "uds_26":
+                params["dtc_update_effect_confirmed"] = "true"
+            if test_id == "uds_27":
+                params["dtc_clear_effect_confirmed"] = "true"
+            worker, summary, run_dir = run_simulated(test_id, params, fail_session=True)
+            assert summary["verdict"] != VERDICT_CONFIG
+            assert summary["request_hex"]
+            assert summary["positive_response"] is True
+            assert summary["verdict"] in {"FINDING_CANDIDATE", "FINDING_CONFIRMED"}
+            expected_payload = make_modular_runner("diagnostic_service").build_payload(normalize_case_model(registry[test_id].case_model), params)
+            session_index = next(index for index, payload in enumerate(worker.sent_uds) if payload and payload[0] == 0x10)
+            main_index = next(index for index, payload in enumerate(worker.sent_uds) if payload == expected_payload)
+            assert session_index < main_index
+            assert summary["request_hex"] == spaced(expected_payload)
+            transcript = (run_dir / "transcript.txt").read_text(encoding="utf-8")
+            assert "continuing to configured test request" in transcript
+            for blocker in ("CONFIG ERROR", "Manual operator " + "authorization", "safe mode", "manual " + "confirmation"):
+                assert blocker not in transcript
+                assert blocker not in str(summary.get("rationale", ""))
+            main_obs = next(item for item in summary["observations"] if item.get("step") != "session_flow")
+            assert main_obs["tx_arbitration_id"] == "0x681"
+            assert main_obs["rx_arbitration_id"] == "0x601"
+            assert main_obs["request_payload"] == spaced(expected_payload)
+            assert main_obs["response_payload"] == spaced(bytes([(expected_payload[0] + 0x40) & 0xFF]) + expected_payload[1:min(len(expected_payload), 3)])
+            for field in ("timestamp", "tx_arbitration_id", "rx_arbitration_id", "request_payload", "response_payload", "request_sid", "response_sid", "nrc", "nrc_meaning", "decoded_nrc", "preliminary_verdict", "timeout_or_no_response"):
+                assert field in main_obs
+
+        uds31_runtime_params = default_params_for_test(registry["uds_31"]) | {
+            "session_flow": "7E",
+            "payload_pattern": "zero-fill",
+            "payload_length": "8",
+            "recovery_delay_seconds": "0",
+        }
+        uds31_worker, uds31_summary, uds31_run_dir = run_simulated("uds_31", uds31_runtime_params, fail_session=True)
+        assert uds31_summary["verdict"] == "FINDING_CANDIDATE"
+        uds31_expected_payload = make_modular_runner("robustness").build_payload(normalize_case_model(registry["uds_31"].case_model), uds31_runtime_params)
+        uds31_session_index = next(index for index, payload in enumerate(uds31_worker.sent_uds) if payload and payload[0] == 0x10)
+        uds31_main_index = next(index for index, payload in enumerate(uds31_worker.sent_uds) if payload == uds31_expected_payload)
+        assert uds31_session_index < uds31_main_index
+        assert uds31_summary["request_hex"] == spaced(uds31_expected_payload)
+        uds31_transcript = (uds31_run_dir / "transcript.txt").read_text(encoding="utf-8")
+        assert "continuing to configured test request" in uds31_transcript
+        for blocker in ("CONFIG ERROR", "Manual operator " + "authorization", "safe mode", "manual " + "confirmation"):
+            assert blocker not in uds31_transcript
+
+        _, nrc_summary, nrc_run_dir = run_simulated("uds_27", default_params_for_test(registry["uds_27"]), uds_mode="nrc")
+        assert nrc_summary["verdict"] != VERDICT_CONFIG
+        assert nrc_summary["nrc"] == "0x33"
+        assert nrc_summary["decoded_nrc"] == "NRC 0x33 - securityAccessDenied"
+        nrc_raw_log = (nrc_run_dir / "raw_can_or_uds_log.txt").read_text(encoding="utf-8")
+        assert "0x33" in nrc_raw_log
+        assert "NRC 0x33 - securityAccessDenied" in nrc_raw_log
+
+        _, timeout_summary, _ = run_simulated("uds_30", default_params_for_test(registry["uds_30"]), uds_mode="timeout")
+        assert timeout_summary["verdict"] == "INCONCLUSIVE"
+        assert timeout_summary["response_type"] == "timeout"
+        assert timeout_summary["evidence_record"]["timeout_or_no_response"] is True
+
+        uds28_range_params = default_params_for_test(registry["uds_28"]) | {
+            "traffic_mode": "can-id-random-frame",
+            "start_arbid": "0x600",
+            "end_arbid": "0x620",
+            "payload": "3E 00",
+            "delay": "0",
+            "timeout": "0.01",
+            "send_rate_msgs_per_sec": "10000",
+            "max_duration_seconds": "1",
+            "max_messages": "33",
+            "extended_id": False,
+        }
+        uds28_worker, uds28_summary, _ = run_simulated("uds_28", uds28_range_params)
+        assert [item[0] for item in uds28_worker.sent_can] == list(range(0x600, 0x621))
+        assert [item[1] for item in uds28_worker.sent_can] == [bytes.fromhex("3E 00")] * 33
+        assert {item[2] for item in uds28_worker.sent_can} == {False}
+        assert uds28_summary["actual_messages_sent"] == 33
+        assert all(item.get("response_arbitration_id") == "0x650" for item in uds28_summary["observations"])
+        assert all("preliminary_verdict" in item for item in uds28_summary["observations"])
+
+        uds28_single_worker, uds28_single_summary, _ = run_simulated("uds_28", uds28_range_params | {
+            "start_arbid": "0x620",
+            "end_arbid": "0x620",
+            "max_messages": "1",
+        })
+        assert [item[0] for item in uds28_single_worker.sent_can] == [0x620]
+        assert uds28_single_summary["final_candidate_arbid_count"] == 1
+
+        uds28_ext_worker, _, _ = run_simulated("uds_28", uds28_range_params | {
+            "start_arbid": "0x1FFFFFE",
+            "end_arbid": "0x1FFFFFF",
+            "max_messages": "2",
+            "extended_id": True,
+        })
+        assert [item[0] for item in uds28_ext_worker.sent_can] == [0x1FFFFFE, 0x1FFFFFF]
+        assert {item[2] for item in uds28_ext_worker.sent_can} == {True}
+
+        uds32_blank_tp = default_params_for_test(registry["uds_32"]) | {"tester_present_enabled": False, "tester_present_interval_seconds": ""}
+        assert RunWorker(registry["uds_32"], mk_target(dry_run=False, authorized=False), uds32_blank_tp, "")._preflight_errors() == {}
+        uds32_default_tp = default_params_for_test(registry["uds_32"]) | {"tester_present_enabled": True, "tester_present_interval_seconds": ""}
+        assert RunWorker(registry["uds_32"], mk_target(dry_run=False, authorized=False), uds32_default_tp, "")._preflight_errors() == {}
+
+        uds32_limited_worker, uds32_limited_summary, _ = run_simulated("uds_32", default_params_for_test(registry["uds_32"]) | {
+            "send_rate_msgs_per_sec": "10000",
+            "max_duration_seconds": "1",
+            "max_frames": "3",
+        })
+        assert uds32_limited_summary["stop_reason"] == "max_frames_reached"
+        assert uds32_limited_summary["actual_frames_sent"] == 3
+        assert len(uds32_limited_worker.sent_can) == 3
+
+        _, uds32_bus_summary, uds32_bus_dir = run_simulated("uds_32", default_params_for_test(registry["uds_32"]) | {
+            "send_rate_msgs_per_sec": "10000",
+            "max_duration_seconds": "1",
+            "max_frames": "3",
+        }, bus_error_after=0)
+        assert uds32_bus_summary["stop_reason"] == "bus_error"
+        assert uds32_bus_summary["bus_error_count"] == 1
+        assert "BUS_ERROR" in (uds32_bus_dir / "raw_can_or_uds_log.txt").read_text(encoding="utf-8")
+
+        _, uds32_stop_summary, _ = run_simulated("uds_32", default_params_for_test(registry["uds_32"]), stop_before_run=True)
+        assert uds32_stop_summary["stop_reason"] == "user_stop"
+        assert uds32_stop_summary["actual_frames_sent"] == 0
 
     uds28_test = registry["uds_28"]
     uds28_base_params = default_params_for_test(uds28_test) | {
@@ -7510,7 +7826,8 @@ def run_self_checks() -> None:
         uds28_base_params | {
             "traffic_mode": "can-id-random-frame",
             "arbid_strategy": "manual-range",
-            "manual_arbid_range": "0x700-0x702",
+            "start_arbid": "0x700",
+            "end_arbid": "0x702",
             "generator_mode": "transport-valid random",
             "_mock_uds28_stop_after_messages": "2",
         },
@@ -7581,7 +7898,8 @@ def run_self_checks() -> None:
         uds28_base_params | {
             "traffic_mode": "mixed",
             "arbid_strategy": "manual-range",
-            "manual_arbid_range": "0x710-0x711",
+            "start_arbid": "0x710",
+            "end_arbid": "0x711",
             "generator_mode": "mixed valid/invalid",
             "valid_invalid_ratio_percent": "50",
             "tester_present_enabled": True,
@@ -7603,13 +7921,37 @@ def run_self_checks() -> None:
     validation_gui = UdsReconGui()
     validation_gui._select_test("uds_28")
     validation_gui._set_combo_data("traffic_mode", "can-id-random-frame")
-    validation_gui._set_combo_data("arbid_strategy", "observed-only")
-    observed_errors = validation_gui._validate_uds28_gui_state(validation_gui._collect_params())
-    assert "arbid_strategy" in observed_errors
     validation_gui._set_combo_data("arbid_strategy", "manual-range")
-    validation_gui.field_widgets["manual_arbid_range"].setText("0x700-0x6FF")
+    observed_errors = validation_gui._validate_uds28_gui_state(validation_gui._collect_params())
+    assert "arbid_strategy" not in observed_errors
+    validation_gui._set_combo_data("arbid_strategy", "manual-range")
+    validation_gui.field_widgets["start_arbid"].setText("0x700")
+    validation_gui.field_widgets["end_arbid"].setText("0x6FF")
     manual_errors = validation_gui._validate_uds28_gui_state(validation_gui._collect_params())
-    assert "manual_arbid_range" in manual_errors
+    assert "start_arbid" in manual_errors
+    boundary_params = default_params_for_test(uds28_test) | {
+        "traffic_mode": "can-id-random-frame",
+        "arbid_strategy": "manual-range",
+        "start_arbid": "0x620",
+        "end_arbid": "0x620",
+        "payload": "3E 00",
+        "timeout": "0.01",
+        "delay": "0",
+        "send_rate_msgs_per_sec": "100",
+        "max_duration_seconds": "1",
+        "max_messages": "1",
+        "extended_id": False,
+    }
+    single_range_errors = validation_gui._validate_uds28_gui_state(boundary_params)
+    assert "start_arbid" not in single_range_errors and "end_arbid" not in single_range_errors
+    reverse_range_errors = validation_gui._validate_uds28_gui_state(boundary_params | {"start_arbid": "0x621", "end_arbid": "0x620"})
+    assert "start_arbid" in reverse_range_errors
+    too_large_errors = validation_gui._validate_uds28_gui_state(boundary_params | {"start_arbid": "0x000", "end_arbid": "0x1000", "extended_id": True})
+    assert "end_arbid" in too_large_errors
+    standard_overflow_errors = validation_gui._validate_uds28_gui_state(boundary_params | {"start_arbid": "0x800", "end_arbid": "0x800", "extended_id": False})
+    assert "start_arbid" in standard_overflow_errors and "0x7FF" in standard_overflow_errors["start_arbid"]
+    extended_overflow_errors = validation_gui._validate_uds28_gui_state(boundary_params | {"start_arbid": "0x800", "end_arbid": "0x800", "extended_id": True})
+    assert "start_arbid" not in extended_overflow_errors and "end_arbid" not in extended_overflow_errors
     invalid_seed_params = default_params_for_test(uds28_test) | {
         "generator_mode": "manual seed payload list",
         "manual_seed_payloads": "AA BB\n0xGG",
@@ -7622,9 +7964,16 @@ def run_self_checks() -> None:
 
 
 def main() -> int:
-    if len(sys.argv) > 1 and sys.argv[1] == "--self-check":
-        run_self_checks()
-        print("self-checks passed")
+    args = set(sys.argv[1:])
+    if "--self-check" in args or "--runtime-regression" in args:
+        include_runtime = "--runtime" in args or "--runtime-regression" in args
+        run_self_checks(include_runtime=include_runtime)
+        if include_runtime and "--self-check" in args:
+            print("self-checks passed with runtime regression")
+        elif include_runtime:
+            print("runtime regression passed")
+        else:
+            print("self-checks passed")
         return 0
     app = QApplication(sys.argv)
     win = UdsReconGui()

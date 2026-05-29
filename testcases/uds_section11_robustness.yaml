@@ -17,7 +17,7 @@ testcases:
       "0x01": "on / enable DTC setting"
       "0x02": "off / disable DTC setting"
     parameters:
-      session_flow: "03"
+      session_flow: ""
       subfunction: "0x01"
       raw_payload_override: ""
       advanced_raw_payload_override_enabled: false
@@ -30,8 +30,8 @@ testcases:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
-        default: "03"
-        help: "Subfunctions only: 03 or 03 02."
+        default: ""
+        help: "Optional. Leave empty to send without diagnostic-session setup."
       - key: subfunction
         label: ControlDTCSetting subfunction
         kind: combo
@@ -107,15 +107,12 @@ testcases:
         default: "2.0"
         required: true
     preconditions:
-      - Bench/simulator mode is required.
       - Operator must understand that changing DTC setting may affect diagnostic logging/evidence.
       - This test does not perform SecurityAccess seed/key exchange before ControlDTCSetting.
       - Single-shot execution only; no flood behavior.
     safety_level: controlled-diagnostic
     safety_warning: Changing DTC setting may affect diagnostic evidence and logging behavior.
     safety_guard:
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 10.0
       max_frame_rate: 2.0
       stop_button_required: true
@@ -166,13 +163,12 @@ testcases:
     default_payload: "14 FF FF FF"
     implemented: true
     destructive_or_disruptive: true
-    requires_manual_confirmation: true
     supported_group_of_dtc_presets:
       "FF FF FF": "all DTC groups"
       custom: "manual 3-byte groupOfDTC"
       raw_payload_override: "advanced raw payload override"
     parameters:
-      session_flow: "03"
+      session_flow: ""
       group_of_dtc_preset: "all"
       group_of_dtc: "FF FF FF"
       raw_payload_override: ""
@@ -188,8 +184,8 @@ testcases:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
-        default: "03"
-        help: "Subfunctions only: 03 or 03 02."
+        default: ""
+        help: "Optional. Leave empty to send without diagnostic-session setup."
       - key: group_of_dtc_preset
         label: groupOfDTC preset
         kind: combo
@@ -276,16 +272,12 @@ testcases:
         default: "2.0"
         required: true
     preconditions:
-      - Bench/simulator mode is required.
-      - Manual confirmation is required before execution.
       - Operator must understand that ClearDiagnosticInformation may erase DTC records and diagnostic evidence.
       - This test does not perform SecurityAccess seed/key exchange before ClearDiagnosticInformation.
       - Single-shot execution only; no flood behavior.
     safety_level: destructive-diagnostic
-    safety_warning: This test may erase diagnostic evidence / DTC records. Manual confirmation is required.
+    safety_warning: This test may erase diagnostic evidence / DTC records. ECU response is recorded as observed.
     safety_guard:
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 10.0
       max_frame_rate: 2.0
       stop_button_required: true
@@ -334,20 +326,26 @@ testcases:
     service_id: ""
     default_payload: "<bounded random/mixed messages under SafetyGuard limits>"
     parameters:
-      traffic_mode: uds-targeted-isotp
-      session_flow: "03"
+      traffic_mode: can-id-random-frame
+      session_flow: ""
       arbid_strategy: manual-range
+      start_arbid: "0x700"
+      end_arbid: "0x7FF"
+      payload: "3E 00"
+      timeout: "0.2"
+      delay: "0.05"
+      extended_id: false
       manual_arbid_range: "0x700-0x7FF"
       gap_sample_count: "20"
       non_existing_sample_count: "20"
-      generator_mode: transport-valid random
+      generator_mode: manual payload
       manual_seed_payloads: ""
       send_rate_msgs_per_sec: "10.0"
       max_duration_seconds: "30.0"
       max_messages: "300"
       tester_present_enabled: false
       tester_present_interval_seconds: "2.0"
-      execution_mode: planning_dry_run
+      execution_mode: armed_bounded_execution
       random_seed: ""
       valid_invalid_ratio_percent: "50"
       payload_min_length: "1"
@@ -364,7 +362,7 @@ testcases:
       - key: traffic_mode
         label: Traffic mode
         kind: combo
-        default: uds-targeted-isotp
+        default: can-id-random-frame
         choices:
           - label: UDS-targeted ISO-TP mode
             value: uds-targeted-isotp
@@ -375,7 +373,7 @@ testcases:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
-        default: "03"
+        default: ""
         help: "Subfunctions only: 03 or 03 02. Optional/informational in CAN-ID random frame mode."
       - key: arbid_strategy
         label: ArbID strategy
@@ -396,6 +394,35 @@ testcases:
         label: Manual ArbID range / non-existing boundary
         kind: text
         default: "0x700-0x7FF"
+      - key: start_arbid
+        label: Start ArbID
+        kind: text
+        default: "0x700"
+        required: true
+      - key: end_arbid
+        label: End ArbID
+        kind: text
+        default: "0x7FF"
+        required: true
+      - key: payload
+        label: Payload
+        kind: textarea
+        default: "3E 00"
+        required: true
+      - key: timeout
+        label: Response timeout seconds
+        kind: text
+        default: "0.2"
+        required: true
+      - key: delay
+        label: Delay seconds
+        kind: text
+        default: "0.05"
+        required: true
+      - key: extended_id
+        label: Extended CAN ID
+        kind: checkbox
+        default: false
       - key: gap_sample_count
         label: Gap sample count
         kind: text
@@ -407,8 +434,10 @@ testcases:
       - key: generator_mode
         label: Generator mode
         kind: combo
-        default: transport-valid random
+        default: manual payload
         choices:
+          - label: manual payload
+            value: manual payload
           - label: transport-valid random
             value: transport-valid random
           - label: UDS-shaped valid random
@@ -455,20 +484,16 @@ testcases:
       - key: execution_mode
         label: Execution mode
         kind: combo
-        default: planning_dry_run
+        default: armed_bounded_execution
         choices:
           - label: Planning / dry-run only
             value: planning_dry_run
           - label: Armed bounded execution
             value: armed_bounded_execution
     preconditions: &future_preconditions
-      - Bench/simulator mode is required.
-      - Manual confirmation is required before execution once logic is implemented.
-      - Execution is currently stubbed and performs no CAN transmission.
+      - Execution is bounded by duration, rate, max messages, timeout, and Stop button.
     safety_level: framework-placeholder
     safety_guard: &future_safety_guard
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 30.0
       max_frame_rate: 10.0
       max_send_rate: 10.0
@@ -478,11 +503,11 @@ testcases:
       stop_on_no_response_threshold: 10
       tester_present_enabled: false
       tester_present_interval_seconds: 2.0
-    expected_behavior: Assessment scenario is visible and reviewable; no aggressive random/flood traffic is transmitted in this task.
+    expected_behavior: Bounded configured traffic is transmitted and ECU/bus response or timeout is recorded.
     pass_criteria: &future_pass_criteria
-      - Framework can load the case definition and show parameters without sending CAN frames.
+      - ECU/bus remains responsive and no degradation is observed during bounded configured traffic.
     fail_criteria: &future_fail_criteria
-      - Framework cannot load the case definition or attempts CAN transmission before implementation.
+      - Target traffic starvation, bus error, ECU reset, physical function interruption, or recovery failure is observed.
     evidence_fields:
       - timestamp
       - display_id
@@ -530,7 +555,7 @@ testcases:
     default_payload: "28 01 01"
     implemented: true
     parameters:
-      session_flow: "03"
+      session_flow: ""
       communication_control_preset: "0x01"
       communication_type: "0x01"
       manual_communication_type: "0x01"
@@ -547,8 +572,8 @@ testcases:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
-        default: "03"
-        help: "Subfunctions only: 03 or 03 02."
+        default: ""
+        help: "Optional. Leave empty to send without diagnostic-session setup."
       - key: communication_control_preset
         label: Message preset / controlType
         kind: combo
@@ -587,14 +612,10 @@ testcases:
         default: ""
         help: Manual observation recorded with evidence.
     preconditions:
-      - Bench/simulator or controlled vehicle mode is required.
-      - Manual confirmation is required before execution.
       - Execute one controlled CommunicationControl request only; no flood or repeated aggressive send.
       - Operational/driving-state testing must not be run on public roads.
     safety_level: destructive-diagnostic
     safety_guard:
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 10.0
       max_frame_rate: 2.0
       max_messages: 1
@@ -642,7 +663,7 @@ testcases:
     default_payload: "11 03"
     implemented: true
     parameters:
-      session_flow: "03"
+      session_flow: ""
       reset_subfunction: "0x03"
       vehicle_state: parked
       raw_payload_override: ""
@@ -656,7 +677,7 @@ testcases:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
-        default: "03"
+        default: ""
       - key: reset_subfunction
         label: Reset subfunction
         kind: combo
@@ -678,14 +699,10 @@ testcases:
           - {label: operational/driving-state simulated, value: operational/driving-state simulated}
           - {label: controlled driving test, value: controlled driving test}
     preconditions:
-      - Bench/simulator or controlled vehicle mode is required.
-      - Manual confirmation is required before execution.
       - Execute one controlled ECU Reset request only by default.
       - Operational/driving-state testing must not be run on public roads.
     safety_level: destructive-diagnostic
     safety_guard:
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 10.0
       max_frame_rate: 2.0
       max_messages: 1
@@ -731,7 +748,7 @@ testcases:
     default_payload: "<bounded oversized UDS payload>"
     implemented: true
     parameters:
-      session_flow: "03"
+      session_flow: ""
       target_service: "0x2E"
       subfunction: "0x01"
       did_hex: "0xF190"
@@ -759,7 +776,7 @@ testcases:
       - key: session_flow
         label: Diagnostic session flow
         kind: textarea
-        default: "03"
+        default: ""
       - key: target_service
         label: Target service
         kind: combo
@@ -771,7 +788,7 @@ testcases:
           - {label: "0x2F InputOutputControlByIdentifier", value: "0x2F"}
           - {label: "0x34 RequestDownload", value: "0x34"}
           - {label: "0x36 TransferData", value: "0x36"}
-          - {label: "0x3D WriteMemoryByAddress, advanced/disabled by default", value: "0x3D"}
+          - {label: "0x3D WriteMemoryByAddress", value: "0x3D"}
           - {label: "0x2C DynamicallyDefineDataIdentifier", value: "0x2C"}
           - {label: manual service, value: manual}
       - key: payload_length
@@ -794,14 +811,10 @@ testcases:
         kind: checkbox
         default: true
     preconditions:
-      - Bench/simulator mode is required.
-      - Manual confirmation is required before execution.
       - Single attempt by default; attempt count is bounded.
       - 0x3D WriteMemoryByAddress is disabled unless explicitly enabled in Advanced.
     safety_level: destructive-diagnostic
     safety_guard:
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 10.0
       max_frame_rate: 1.0
       max_messages: 3
@@ -857,7 +870,7 @@ testcases:
       send_rate_msgs_per_sec: "10.0"
       max_frames: "100"
       target_ids_monitored: ""
-      execution_mode: planning_dry_run
+      execution_mode: armed_bounded_execution
       burst_size: "1"
       burst_interval_ms: "0"
       random_seed: ""
@@ -902,14 +915,11 @@ testcases:
         default: "100"
         required: true
     preconditions:
-      - Bench/simulator mode is required.
       - UDS-32 is a CAN bus-level availability/arbitration test, not a normal UDS service.
-      - Actual sending is bounded and requires GUI Armed bounded execution with manual confirmation.
-      - CLI non-dry execution is blocked before CAN open.
+      - Actual sending is bounded by duration, send rate, max frames, bus error handling, and operator stop.
+      - GUI execution sends bounded CAN traffic and records raw CAN evidence.
     safety_level: destructive-diagnostic
     safety_guard:
-      bench_mode_required: true
-      manual_confirm_required: true
       max_duration_seconds: 10.0
       max_frame_rate: 10.0
       max_send_rate: 10.0
