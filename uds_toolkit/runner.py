@@ -372,12 +372,12 @@ def _is_modular_placeholder(tc: Mapping[str, Any]) -> bool:
 
 
 def _is_modular_case(tc: Mapping[str, Any]) -> bool:
-    return str(tc.get("type") or "") in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}
+    return str(tc.get("type") or "") in {"diagnostic_service", "arbid_range_scan", "flood", "robustness", "can_priority_flood"}
 
 
 def _modular_runner_kind(tc: Mapping[str, Any]) -> str:
     case_type = str(tc.get("type") or "")
-    if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+    if case_type in {"diagnostic_service", "arbid_range_scan", "flood", "robustness", "can_priority_flood"}:
         return case_type
     return "diagnostic_service"
 

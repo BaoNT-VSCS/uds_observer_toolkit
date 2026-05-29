@@ -580,28 +580,41 @@ class DiagnosticServiceRunner(_StubRunner):
         return group
 
 
-class FloodRunner(_StubRunner):
-    runner_name = "FloodRunner"
+class ArbIdRangeScanRunner(_StubRunner):
+    runner_name = "ArbIdRangeScanRunner"
 
     def validate(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> dict[str, str]:
         errors = super().validate(case, parameters, safety_guard)
         if case.case_id != "uds_28":
             return errors
-        rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
-        duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
-        max_messages = _int_param(parameters, "max_messages", safety_guard.max_messages)
-        if rate <= 0:
-            errors["send_rate_msgs_per_sec"] = "Send rate must be > 0 msg/s."
-        if duration <= 0:
-            errors["max_duration_seconds"] = "Duration must be > 0 seconds."
-        if max_messages <= 0:
-            errors["max_messages"] = "Max messages must be > 0."
-        if rate > safety_guard.max_send_rate:
-            errors["send_rate_msgs_per_sec"] = "Send rate exceeds SafetyGuard max_send_rate."
-        if duration > safety_guard.max_duration_seconds:
-            errors["max_duration_seconds"] = "Duration exceeds SafetyGuard max_duration_seconds."
-        if max_messages > safety_guard.max_messages:
-            errors["max_messages"] = "Max messages exceeds SafetyGuard max_messages."
+        try:
+            start = _parse_hex_int(parameters.get("start_arbid") or "", "start_arbid", 0x1FFFFFFF)
+            end = _parse_hex_int(parameters.get("end_arbid") or "", "end_arbid", 0x1FFFFFFF)
+            requested_max = _int_param(parameters, "max_candidates", 4096)
+            if requested_max <= 0:
+                errors["max_candidates"] = "max_candidates must be > 0."
+            elif requested_max > 4096:
+                errors["max_candidates"] = "max_candidates is limited to 4096 IDs per run."
+            if end < start:
+                errors["start_arbid"] = "end_arbid must be >= start_arbid"
+            elif end - start + 1 > self._max_candidates(parameters):
+                errors["max_candidates"] = "ArbID range exceeds max_candidates."
+            if not bool(parameters.get("extended_id", False)) and end > 0x7FF:
+                errors["start_arbid"] = "Standard CAN ID range must be <= 0x7FF; enable extended_id for 29-bit IDs."
+        except ValueError as exc:
+            errors["start_arbid"] = str(exc)
+        try:
+            payload = parse_hex_bytes(parameters.get("payload") or "")
+            self.on_wire_payload(parameters, payload)
+        except ValueError as exc:
+            errors["payload"] = str(exc)
+        for key, label in (("response_timeout_seconds", "Response timeout"), ("delay_seconds", "Delay")):
+            try:
+                value = float(parameters.get(key, parameters.get("timeout" if key.startswith("response") else "delay", "")))
+                if value < 0:
+                    errors[key] = f"{label} must be >= 0."
+            except (TypeError, ValueError):
+                errors[key] = f"{label} must be numeric."
         return errors
 
     def dry_run_preview(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
@@ -627,16 +640,19 @@ class FloodRunner(_StubRunner):
             runner_name=self.runner_name,
             case_id=case.case_id,
             steps=[{
-                "step": "uds28_bounded_execution_plan",
-                "traffic_mode": str(parameters.get("traffic_mode") or "uds-targeted-isotp"),
-                "arb_id_strategy": str(parameters.get("arbid_strategy") or "manual-range"),
-                "generator_mode": str(parameters.get("generator_mode") or "transport-valid random"),
-                "send_rate_msgs_per_sec": rate,
-                "duration_seconds": duration,
-                "max_messages": max_messages,
-                "message": "Dry-run preview only. GUI armed execution uses the same bounded values and SafetyGuard gates.",
+                "step": "uds28_manual_arbid_range_scan",
+                "manual_range": self._manual_range(parameters),
+                "payload_mode": self.payload_mode(parameters),
+                "payload": spaced(parse_hex_bytes(parameters.get("payload") or "")),
+                "on_wire_payload": spaced(self.on_wire_payload(parameters)),
+                "candidate_count": self._candidate_count(parameters),
+                "response_timeout_seconds": self._response_timeout(parameters),
+                "delay_seconds": self._delay(parameters),
+                "extended_id": bool(parameters.get("extended_id", False)),
+                "message": "Dry-run preview only. GUI armed execution sends the configured payload once to each candidate ArbID.",
             }],
-            note="UDS-28 is planned with bounded parameters.",
+            implemented=True,
+            note="UDS-28 manual ArbID range scan is planned with bounded candidate limits.",
         )
 
     def run(self, case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> RunnerResult:
@@ -655,6 +671,49 @@ class FloodRunner(_StubRunner):
             rationale="UDS-28 direct runner is GUI-only in this build; CLI dry-run previews are supported and non-dry CLI is blocked before CAN open.",
             evidence={"plan": plan.as_dict()},
         )
+
+    @staticmethod
+    def _max_candidates(parameters: dict[str, Any]) -> int:
+        return max(1, min(4096, _int_param(parameters, "max_candidates", 4096)))
+
+    @staticmethod
+    def _manual_range(parameters: dict[str, Any]) -> str:
+        start = _parse_hex_int(parameters.get("start_arbid") or "", "start_arbid", 0x1FFFFFFF)
+        end = _parse_hex_int(parameters.get("end_arbid") or "", "end_arbid", 0x1FFFFFFF)
+        return f"0x{start:X}-0x{end:X}"
+
+    @staticmethod
+    def _candidate_count(parameters: dict[str, Any]) -> int:
+        start = _parse_hex_int(parameters.get("start_arbid") or "", "start_arbid", 0x1FFFFFFF)
+        end = _parse_hex_int(parameters.get("end_arbid") or "", "end_arbid", 0x1FFFFFFF)
+        return max(0, min(ArbIdRangeScanRunner._max_candidates(parameters), end - start + 1))
+
+    @staticmethod
+    def _response_timeout(parameters: dict[str, Any]) -> float:
+        return _float_param(parameters, "response_timeout_seconds", _float_param(parameters, "timeout", 0.2))
+
+    @staticmethod
+    def _delay(parameters: dict[str, Any]) -> float:
+        return _float_param(parameters, "delay_seconds", _float_param(parameters, "delay", 0.05))
+
+    @staticmethod
+    def payload_mode(parameters: dict[str, Any]) -> str:
+        mode = str(parameters.get("payload_mode") or "uds-isotp-app")
+        if mode not in {"uds-isotp-app", "raw-can"}:
+            raise ValueError("payload_mode must be uds-isotp-app or raw-can")
+        return mode
+
+    @staticmethod
+    def on_wire_payload(parameters: dict[str, Any], payload: bytes | None = None) -> bytes:
+        payload = parse_hex_bytes(parameters.get("payload") or "") if payload is None else payload
+        mode = ArbIdRangeScanRunner.payload_mode(parameters)
+        if mode == "raw-can":
+            if not 0 < len(payload) <= 8:
+                raise ValueError("raw CAN payload must contain 1..8 bytes")
+            return payload
+        if not 0 < len(payload) <= 7:
+            raise ValueError("UDS/ISO-TP app payload must contain 1..7 bytes for SingleFrame scan")
+        return bytes([len(payload)]) + payload
 
 
 class RobustnessRunner(_StubRunner):
@@ -945,7 +1004,8 @@ class CanPriorityFloodRunner(_StubRunner):
 
 RUNNER_INTERFACES = {
     "diagnostic_service": DiagnosticServiceRunner,
-    "flood": FloodRunner,
+    "arbid_range_scan": ArbIdRangeScanRunner,
+    "flood": ArbIdRangeScanRunner,
     "robustness": RobustnessRunner,
     "can_priority_flood": CanPriorityFloodRunner,
 }
@@ -953,7 +1013,7 @@ RUNNER_INTERFACES = {
 
 def _preview_safety_line(case: TestCaseModel) -> str:
     if case.case_id == "uds_28":
-        return "Operational limits: bounded DoS/availability traffic"
+        return "Operational limits: bounded manual ArbID range scan"
     if case.safety_level in {"destructive-diagnostic", "controlled-diagnostic"}:
         return "Execution: sends configured request and records ECU response"
     return "Safety: dry-run only"
@@ -994,53 +1054,39 @@ def _parse_byte_param(parameters: dict[str, Any], key: str, default: int) -> int
 
 
 def _uds28_preview(case: TestCaseModel, parameters: dict[str, Any], safety_guard: SafetyGuard) -> str:
-    traffic_mode = str(parameters.get("traffic_mode") or "uds-targeted-isotp")
-    strategy = str(parameters.get("arbid_strategy") or "manual-range")
-    rate = _float_param(parameters, "send_rate_msgs_per_sec", safety_guard.max_send_rate)
-    duration = _float_param(parameters, "max_duration_seconds", safety_guard.max_duration_seconds)
-    derived_messages = max(1, int(rate * duration)) if rate > 0 and duration > 0 else 0
-    max_messages = min(_int_param(parameters, "max_messages", safety_guard.max_messages), derived_messages) if derived_messages else _int_param(parameters, "max_messages", safety_guard.max_messages)
-    delay_ms = 0 if rate <= 0 else 1000.0 / rate
-    tester_present = bool(parameters.get("tester_present_enabled", False)) and traffic_mode in {"uds-targeted-isotp", "mixed"}
-    tester_present_interval = _float_param(parameters, "tester_present_interval_seconds", safety_guard.tester_present_interval_seconds)
-    tester_present_count = int(duration // tester_present_interval) if tester_present and tester_present_interval > 0 else 0
-    catalog_loaded = bool(parameters.get("catalog_file"))
-    observed_count = _int_param(parameters, "observed_arbid_count", 0)
-    non_existing_count = _int_param(parameters, "non_existing_sample_count", 0) if strategy == "mixed observed + non-existing" else _int_param(parameters, "gap_sample_count", 0) if strategy == "observed-range-with-gaps" else 0
-    selected_count = len([item for item in str(parameters.get("selected_arbid") or "").replace(";", ",").split(",") if item.strip()])
-    final_candidates = 1 if traffic_mode == "uds-targeted-isotp" else max(0, observed_count + selected_count + non_existing_count)
-    if strategy == "manual-range":
-        final_candidates = _int_param(parameters, "manual_range_candidate_count", final_candidates)
-    generator_mode = str(parameters.get("generator_mode") or "transport-valid random")
-    generator_notes = {
-        "transport-valid random": "transport framing valid, payload content varies randomly",
-        "UDS-shaped valid random": "valid-looking UDS structures where possible",
-        "UDS-shaped invalid random": "malformed/boundary UDS payloads while transport remains valid",
-        "mixed valid/invalid": "valid-looking and invalid-looking messages are mixed",
-        "manual seed payload list": "analyst-provided seed payloads are repeated or mutated",
-    }
-    traffic_labels = {
-        "uds-targeted-isotp": "UDS-targeted ISO-TP mode",
-        "can-id-random-frame": "CAN-ID random frame mode",
-        "mixed": "Mixed mode",
-    }
+    del safety_guard
+    try:
+        start = _parse_hex_int(parameters.get("start_arbid") or "", "start_arbid", 0x1FFFFFFF)
+        end = _parse_hex_int(parameters.get("end_arbid") or "", "end_arbid", 0x1FFFFFFF)
+        manual_range = f"0x{start:X}–0x{end:X}"
+        candidate_count = max(0, min(ArbIdRangeScanRunner._max_candidates(parameters), end - start + 1))
+    except ValueError as exc:
+        manual_range = f"<invalid: {exc}>"
+        candidate_count = 0
+    try:
+        payload_bytes = parse_hex_bytes(parameters.get("payload") or "")
+        payload = spaced(payload_bytes)
+        on_wire = spaced(ArbIdRangeScanRunner.on_wire_payload(parameters, payload_bytes))
+    except ValueError as exc:
+        payload = f"<invalid: {exc}>"
+        on_wire = payload
+    mode_label = "UDS/ISO-TP app payload" if str(parameters.get("payload_mode") or "uds-isotp-app") == "uds-isotp-app" else "raw CAN"
     return "\n".join([
         f"Case: {case.case_id} - {case.title}",
-        f"Traffic mode: {traffic_labels.get(traffic_mode, traffic_mode)}",
-        f"Session flow: {parameters.get('session_flow') or '<none>'}",
-        f"ArbID strategy: {strategy if traffic_mode != 'uds-targeted-isotp' else '<not used in UDS-targeted mode>'}",
-        f"Catalog: {'loaded' if catalog_loaded else 'not loaded'}, observed count {observed_count}",
-        f"Candidate ArbIDs: final candidate count {final_candidates}, non-existing count {non_existing_count}",
-        f"Generator: {generator_mode} ({generator_notes.get(generator_mode, 'review generator settings')})",
-        f"Send rate: {rate:g} msg/s",
-        f"Inter-message delay: {delay_ms:.0f} ms",
-        f"Duration: {duration:g} s",
-        f"Max messages: {max_messages}",
-        f"TesterPresent: {'enabled' if tester_present else 'disabled'}, interval {tester_present_interval:g}s, estimated count {tester_present_count} separate",
+        f"Runner: {ArbIdRangeScanRunner.runner_name}",
+        "Traffic mode: Manual ArbID range scan",
+        f"Manual range: {manual_range}",
+        f"Payload mode: {mode_label}",
+        f"Payload: {payload}",
+        f"On-wire payload: {on_wire}",
+        f"Candidate count: {candidate_count}",
+        f"Response timeout: {ArbIdRangeScanRunner._response_timeout(parameters):g}s",
+        f"Delay: {ArbIdRangeScanRunner._delay(parameters):g}s",
+        f"Extended ID: {str(bool(parameters.get('extended_id', False))).lower()}",
         f"Execution: {'armed bounded execution' if parameters.get('execution_mode') == 'armed_bounded_execution' else 'planning/dry-run only'}",
         _preview_safety_line(case),
-        "Stop: Stop DoS button required; stop on duration, max messages, bus error, or operator stop.",
-        "Assessment: no fixed NRC is assumed; verdict depends on degradation, bus stability, physical impact, and recovery.",
+        "Stop: stop on candidate limit, bus error, or operator stop.",
+        "Assessment: records response, timeout, NRC, or positive response for each candidate.",
     ])
 
 

@@ -119,7 +119,7 @@ def _risk_from_type(tc: Mapping[str, Any]) -> str:
         return "SecurityAccess robustness and resistance to bypass"
     if case_type == "uds_access_control_probe":
         return "Unauthorized access to sensitive UDS service"
-    if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+    if case_type in {"diagnostic_service", "arbid_range_scan", "flood", "robustness", "can_priority_flood"}:
         return "Future UDS-26..32 validation placeholder"
     if case_type.endswith("fuzzer"):
         return "Unexpected diagnostic exposure or robustness issue"
@@ -190,6 +190,8 @@ def _default_pass_criteria(tc: Mapping[str, Any], expected_behavior: str) -> lis
         return ["Observed SecurityAccess behavior satisfies sequence, timeout, retry, and response-count expectations for this case."]
     if case_type == "diagnostic_service":
         return ["Diagnostic service response satisfies the case-specific expected behavior."]
+    if case_type == "arbid_range_scan":
+        return ["Manual ArbID range scan records response, timeout, NRC, or positive response for each candidate."]
     if case_type == "flood":
         return ["ECU and bus remain stable within bounded flood guard limits."]
     if case_type == "can_priority_flood":
@@ -214,6 +216,8 @@ def _default_fail_criteria(tc: Mapping[str, Any], risk_property: str) -> list[st
         return ["ECU accepts an invalid SecurityAccess sequence/key or does not enforce the configured attempt/timeout behavior."]
     if case_type == "diagnostic_service":
         return ["Diagnostic service response violates the case-specific fail criteria."]
+    if case_type == "arbid_range_scan":
+        return ["Unexpected positive response, bus error, ECU reset, physical function interruption, or recovery failure is observed."]
     if case_type == "flood":
         return ["ECU, bus, or diagnostic session becomes unstable within bounded flood guard limits."]
     if case_type == "can_priority_flood":
@@ -235,7 +239,7 @@ def _default_evidence_fields(tc: Mapping[str, Any]) -> list[str]:
         return ["request_hex", "response_hex", "nrc", "seed_hex", "verdict", "rationale", "metrics"]
     if case_type == "uds_access_control_probe":
         return ["request_hex", "response_hex", "nrc", "verdict", "rationale", "security_access_observed_before_target"]
-    if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+    if case_type in {"diagnostic_service", "arbid_range_scan", "flood", "robustness", "can_priority_flood"}:
         return ["timestamp", "target_profile", "session_flow", "request_payload", "response_payload", "physical_observation_note", "verdict", "raw_log_path"]
     if case_type.endswith("fuzzer"):
         return ["request_hex", "response_hex", "status", "nrc", "notes"]

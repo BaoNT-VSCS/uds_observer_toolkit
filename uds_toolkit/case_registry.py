@@ -132,7 +132,7 @@ def _definition_from_yaml_case(raw: Mapping[str, Any], source: Path) -> ModularC
 
 
 def _runner_kind_from_type(case_type: str) -> str:
-    if case_type in {"diagnostic_service", "flood", "robustness", "can_priority_flood"}:
+    if case_type in {"diagnostic_service", "arbid_range_scan", "flood", "robustness", "can_priority_flood"}:
         return case_type
     return "diagnostic_service"
 
@@ -141,7 +141,7 @@ def _fallback_definitions() -> list[ModularCaseDefinition]:
     ids = [
         ("uds_26", "UDS-26 Diagnostic Service Placeholder", "diagnostic_service"),
         ("uds_27", "UDS-27 Diagnostic Service Placeholder", "diagnostic_service"),
-        ("uds_28", "UDS-28 Random-message DoS-like Robustness Planning", "flood"),
+        ("uds_28", "UDS-28 Manual Arbitration ID Range Scan", "arbid_range_scan"),
         ("uds_29", "UDS-29 CommunicationControl 0x28 While Operational", "flood"),
         ("uds_30", "UDS-30 ECU Reset 0x11 While Operational", "robustness"),
         ("uds_31", "UDS-31 Oversized Payload / Buffer Robustness", "robustness"),

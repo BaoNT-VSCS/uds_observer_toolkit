@@ -1,4 +1,8 @@
 """GUI package for UDS Observer Toolkit."""
-from .app import main
+
+
+def main(*args, **kwargs):
+    from .app import main as app_main
+    return app_main(*args, **kwargs)
 
 __all__ = ["main"]
